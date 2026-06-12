@@ -117,10 +117,10 @@ function generateBuckets(period: string): number[] {
   const buckets: number[] = [];
 
   if (period === "1d") {
-    // Full calendar day: 00:00 → 00:00 (today)
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-    for (let i = 0; i <= 24; i++) {
-      buckets.push(todayStart + i * 3600_000);
+    // Rolling 24h window: (now - 24h) → now, hourly buckets
+    const nowHour = truncHourLocal(now);
+    for (let i = 24; i >= 0; i--) {
+      buckets.push(nowHour - i * 3600_000);
     }
     return buckets;
   }

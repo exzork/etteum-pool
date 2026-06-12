@@ -24,15 +24,8 @@ interface RequestLog {
   accountQuotaBefore?: number | null;
   accountQuotaAfter?: number | null;
   errorMessage: string | null;
-  requestBody?: unknown;
-  responseBody?: unknown;
   apiKeyId?: number | null;
   apiKeyName?: string | null;
-}
-
-function getCreditMeta(req: RequestLog) {
-  const body = req.requestBody as { _poolprox?: { creditSource?: string; creditUnit?: string; creditRate?: number } } | null | undefined;
-  return body?._poolprox || {};
 }
 
 function getStatusColor(status: string): "success" | "warning" | "error" {
@@ -49,7 +42,7 @@ export default function Requests() {
   const [logs, setLogs] = useState<RequestLog[]>([]);
   const [search, setSearch] = useState("");
   const [provider, setProvider] = useState("all");
-  const [apiKeyFilter, setApiKeyFilter] = useState<number>(0); // 0 = all
+  const [apiKeyFilter, setApiKeyFilter] = useState<string>("all"); // "all" or key id as string
   const [apiKeys, setApiKeys] = useState<ApiKeyEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<RequestLog | null>(null);
@@ -63,7 +56,8 @@ export default function Requests() {
   async function load() {
     setLoading(true);
     try {
-      const res = await fetchRequests(1, 100, provider, apiKeyFilter || undefined) as { data: RequestLog[] };
+      const keyId = apiKeyFilter !== "all" ? Number(apiKeyFilter) : undefined;
+      const res = await fetchRequests(1, 100, provider, keyId) as { data: RequestLog[] };
       setLogs(res.data || []);
     } catch {
       setLogs([]);
@@ -125,10 +119,10 @@ export default function Requests() {
           <option value="codex">Codex</option>
           <option value="qoder">Qoder</option>
         </select>
-        <select value={apiKeyFilter} onChange={(e) => setApiKeyFilter(Number(e.target.value))} className="h-9 rounded-md border border-[var(--border)] bg-[var(--background)] px-3 text-sm text-[var(--foreground)]">
-          <option value={0}>All API Keys</option>
+        <select value={apiKeyFilter} onChange={(e) => setApiKeyFilter(e.target.value)} className="h-9 rounded-md border border-[var(--border)] bg-[var(--background)] px-3 text-sm text-[var(--foreground)]">
+          <option value="all">All API Keys</option>
           {apiKeys.map((k) => (
-            <option key={k.id} value={k.id}>{k.name}</option>
+            <option key={k.id} value={String(k.id)}>{k.name}</option>
           ))}
         </select>
       </div>
@@ -217,12 +211,6 @@ export default function Requests() {
               <Metric label="Credit" value={(selected.creditsUsed || 0).toFixed(2)} color="yellow" />
             </div>
 
-            <div className="mt-3 rounded-md border border-[var(--border)] bg-[var(--secondary)]/40 p-3 text-xs text-[var(--muted-foreground)]">
-              Credit source: <span className="text-[var(--foreground)]">{getCreditMeta(selected).creditSource || "unknown"}</span>
-              {getCreditMeta(selected).creditUnit && <> · Unit: <span className="text-[var(--foreground)]">{getCreditMeta(selected).creditUnit}</span></>}
-              {typeof getCreditMeta(selected).creditRate === "number" && <> · Rate: <span className="text-[var(--foreground)]">{getCreditMeta(selected).creditRate}</span></>}
-            </div>
-
             <div className="mt-5 space-y-1">
               <p className="text-xs uppercase text-[var(--muted-foreground)]">Account</p>
               <p className="text-sm font-medium text-[var(--foreground)]">{selected.accountEmail || `#${selected.accountId}`}</p>
@@ -239,9 +227,6 @@ export default function Requests() {
             {selected.errorMessage && (
               <div className="mt-5 rounded-md bg-[var(--error)]/10 p-3 text-sm text-[var(--error)]">{selected.errorMessage}</div>
             )}
-
-            <JsonBlock title="Request Body" value={selected.requestBody} />
-            <JsonBlock title="Response Body" value={selected.responseBody} />
           </aside>
         </div>
       )}
@@ -257,17 +242,4 @@ function Metric({ label, value, color }: { label: string; value: string | number
     yellow: "bg-[var(--warning)]/10 text-[var(--warning)]",
   };
   return <div className={`rounded-md p-3 ${colors[color]}`}><p className="text-[10px] uppercase opacity-80">{label}</p><p className="font-bold">{value}</p></div>;
-}
-
-function JsonBlock({ title, value }: { title: string; value: unknown }) {
-  const text = JSON.stringify(value || {}, null, 2);
-  return (
-    <div className="mt-5">
-      <div className="mb-2 flex items-center justify-between">
-        <p className="text-xs uppercase text-[var(--muted-foreground)]">{title}</p>
-        <button className="text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)]" onClick={() => navigator.clipboard.writeText(text)}>Copy</button>
-      </div>
-      <pre className="max-h-72 overflow-auto rounded-md border border-[var(--border)] bg-black/30 p-3 text-xs text-[var(--muted-foreground)]">{text}</pre>
-    </div>
-  );
 }

@@ -98,6 +98,7 @@ statsRouter.get("/", async (c) => {
 
 /**
  * GET /api/stats/requests - Get recent request logs (from request_logs, max 500)
+ * Excludes requestBody and responseBody for performance — use /requests/:id for full detail.
  */
 statsRouter.get("/requests", async (c) => {
   const limit = clampNumber(c.req.query("limit"), 50, 1, 500);
@@ -110,8 +111,44 @@ statsRouter.get("/requests", async (c) => {
   if (apiKeyId) whereConditions.push(eq(requestLogs.apiKeyId, Number(apiKeyId)));
 
   const baseQuery = whereConditions.length > 0
-    ? db.select().from(requestLogs).where(and(...whereConditions))
-    : db.select().from(requestLogs);
+    ? db.select({
+        id: requestLogs.id,
+        accountId: requestLogs.accountId,
+        provider: requestLogs.provider,
+        model: requestLogs.model,
+        promptTokens: requestLogs.promptTokens,
+        completionTokens: requestLogs.completionTokens,
+        totalTokens: requestLogs.totalTokens,
+        creditsUsed: requestLogs.creditsUsed,
+        status: requestLogs.status,
+        durationMs: requestLogs.durationMs,
+        errorMessage: requestLogs.errorMessage,
+        accountEmail: requestLogs.accountEmail,
+        accountQuotaBefore: requestLogs.accountQuotaBefore,
+        accountQuotaAfter: requestLogs.accountQuotaAfter,
+        apiKeyId: requestLogs.apiKeyId,
+        apiKeyName: requestLogs.apiKeyName,
+        createdAt: requestLogs.createdAt,
+      }).from(requestLogs).where(and(...whereConditions))
+    : db.select({
+        id: requestLogs.id,
+        accountId: requestLogs.accountId,
+        provider: requestLogs.provider,
+        model: requestLogs.model,
+        promptTokens: requestLogs.promptTokens,
+        completionTokens: requestLogs.completionTokens,
+        totalTokens: requestLogs.totalTokens,
+        creditsUsed: requestLogs.creditsUsed,
+        status: requestLogs.status,
+        durationMs: requestLogs.durationMs,
+        errorMessage: requestLogs.errorMessage,
+        accountEmail: requestLogs.accountEmail,
+        accountQuotaBefore: requestLogs.accountQuotaBefore,
+        accountQuotaAfter: requestLogs.accountQuotaAfter,
+        apiKeyId: requestLogs.apiKeyId,
+        apiKeyName: requestLogs.apiKeyName,
+        createdAt: requestLogs.createdAt,
+      }).from(requestLogs);
 
   const logs = await baseQuery
     .orderBy(desc(requestLogs.createdAt))

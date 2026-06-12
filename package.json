@@ -1,0 +1,25 @@
+{
+  "name": "poolprox3",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun scripts/production.ts",
+    "start:fast": "bun scripts/production.ts --skip-build",
+    "dev": "bun scripts/start.ts",
+    "build": "cd dashboard && bun run build",
+    "migrate": "bun src/db/migrate.ts",
+    "setup": "bash install.sh",
+    "setup:win": "powershell -ExecutionPolicy Bypass -File install.ps1"
+  },
+  "dependencies": {
+    "cbor-x": "^1.6.4",
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.12.17",
+    "playwright": "^1.40.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "bun-types": "latest",
+    "drizzle-kit": "^0.31.10"
+  }
+}

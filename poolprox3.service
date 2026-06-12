@@ -1,0 +1,35 @@
+# systemd user service for PoolProx3 (production mode)
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp poolprox3.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable poolprox3
+#   systemctl --user start poolprox3
+#
+# Commands:
+#   systemctl --user status poolprox3
+#   systemctl --user restart poolprox3
+#   systemctl --user stop poolprox3
+#   journalctl --user -u poolprox3 -f
+#
+# To survive logout:
+#   loginctl enable-linger $USER
+
+[Unit]
+Description=PoolProx3 - Pool Proxy Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/priyo/dev/OpenProject/poolprox3
+ExecStart=/home/priyo/.bun/bin/bun scripts/production.ts --skip-build
+Restart=always
+RestartSec=3
+Environment=NODE_ENV=production
+Environment=PORT=1930
+Environment=DASHBOARD_PORT=1931
+Environment=PATH=/home/priyo/.bun/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

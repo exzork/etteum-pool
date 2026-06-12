@@ -3121,6 +3121,34 @@ class CodeBuddyProviderAdapter(ProviderAdapter):
     async def _fetch_tokens_inner(
         self, page: Any, session: Any, state: str, account: NormalizedAccount
     ) -> dict[str, str]:
+        # ─── ENSURE PAGE IS ON CODEBUDDY DOMAIN ──────────────────────────
+        # After consent-click shortcut, the page may still be on Google domain.
+        # We need to navigate to CodeBuddy to establish session cookies before
+        # making API calls via page.evaluate(fetch(..., credentials:'include')).
+        _codebuddy_base_netloc = urlparse(CODEBUDDY_BASE_URL).netloc
+        try:
+            current_url = page.url
+        except Exception:
+            current_url = ""
+        current_host = urlparse(current_url).netloc if current_url else ""
+
+        if current_host != _codebuddy_base_netloc:
+            _codebuddy_auth_debug(
+                f"page not on CodeBuddy domain (on {current_host}), navigating to complete OAuth"
+            )
+            # Navigate to the OAuth state endpoint — this completes the OAuth flow
+            # and establishes session cookies on the CodeBuddy domain.
+            _state_url = f"{CODEBUDDY_BASE_URL}/started?platform={CODEBUDDY_PLATFORM}&state={state}"
+            try:
+                await page.goto(_state_url, wait_until="domcontentloaded", timeout=30000)
+            except Exception as nav_exc:
+                _codebuddy_auth_debug(f"navigation to CodeBuddy failed: {nav_exc}, trying base URL")
+                try:
+                    await page.goto(CODEBUDDY_BASE_URL, wait_until="domcontentloaded", timeout=30000)
+                except Exception:
+                    pass
+            await asyncio.sleep(1.0)
+
         # ─── ENSURE REGION + TRIAL ACTIVATION ────────────────────────────
         # Region setup and trial activation are required to provision credits.
         # Without this, accounts get "Restricted" status with 0 credits.

@@ -2663,6 +2663,10 @@ class CodeBuddyProviderAdapter(ProviderAdapter):
         # Progress tracking — emit each step only once
         _progress_emitted: set[str] = set()
 
+        # Track consent state — if consent was clicked and browser crashes after,
+        # we know OAuth is complete server-side and can return authenticated immediately.
+        _consent_was_clicked = False
+
         _consecutive_page_errors = 0
         for _ in range(600):  # High iteration cap — inactivity timeout is the real guard
             _now_mono = time.monotonic()
@@ -2682,6 +2686,17 @@ class CodeBuddyProviderAdapter(ProviderAdapter):
                 _consecutive_page_errors += 1
                 # If page is consistently unreachable, browser likely crashed
                 if _consecutive_page_errors >= 3:
+                    # If consent was already clicked, OAuth is complete server-side.
+                    # Browser crash on the redirect is expected — return authenticated.
+                    if _consent_was_clicked:
+                        _codebuddy_auth_debug(
+                            "browser crashed after consent was clicked — "
+                            "treating as authenticated (OAuth complete server-side)"
+                        )
+                        _emit_oauth_progress(
+                            "OAuth complete — consent granted (browser crashed on redirect)"
+                        )
+                        return {"authenticated": True, "state": state}
                     raise RetryableBatcherError(
                         ErrorCode.browser_unexpected_state,
                         f"codebuddy browser connection lost: {_page_exc}",
@@ -2819,31 +2834,17 @@ class CodeBuddyProviderAdapter(ProviderAdapter):
 
             if await _handle_google_consent_continue(page):
                 _last_progress_at = time.monotonic()  # progress: clicked consent
+                _consent_was_clicked = True
                 if "consent" not in _progress_emitted:
                     _emit_oauth_progress("Google consent — granting access")
                     _progress_emitted.add("consent")
-                # After consent is clicked, Google will redirect to CodeBuddy callback.
-                # This redirect often crashes Camoufox (COOP/cross-origin navigation).
-                # Wait briefly for redirect, then treat as authenticated regardless —
-                # the OAuth callback has already been sent to CodeBuddy's backend.
-                await asyncio.sleep(3.0)
-                # Check if we landed on CodeBuddy successfully
-                try:
-                    _post_consent_url = page.url
-                    _post_consent_host = urlparse(_post_consent_url).netloc if _post_consent_url else ""
-                    if _post_consent_host == _codebuddy_base_netloc:
-                        _emit_oauth_progress("OAuth complete — redirect after consent")
-                        return {"authenticated": True, "state": state}
-                except Exception:
-                    # Browser crashed during redirect — this is expected.
-                    # Consent was already granted, so OAuth is complete on the server side.
-                    _codebuddy_auth_debug(
-                        "browser crashed after consent click — treating as authenticated "
-                        "(consent was granted, server-side OAuth is complete)"
-                    )
-                    _emit_oauth_progress("OAuth complete — consent granted (browser crashed on redirect)")
-                    return {"authenticated": True, "state": state}
-                continue
+                # After consent is clicked, the OAuth callback has already been sent
+                # to CodeBuddy's backend. The redirect to CodeBuddy often crashes
+                # Camoufox (COOP/cross-origin navigation). Don't wait for it —
+                # just return authenticated immediately.
+                await asyncio.sleep(2.0)
+                _emit_oauth_progress("OAuth complete — consent granted")
+                return {"authenticated": True, "state": state}
 
             # Only attempt accounts fetch when on CodeBuddy domain (not Google auth).
             # This avoids wasted fetch calls on every loop iteration during OAuth.

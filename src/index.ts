@@ -8,6 +8,7 @@ import { authRouter } from "./auth/index";
 import { proxyRouter } from "./proxy/index";
 import { websocketHandler, getClientCount } from "./ws/index";
 import { isValidApiKey, resolveApiKey, ensureApiKeysTable, type ResolvedApiKey } from "./api/keys";
+import { initSync, isSyncEnabled, isSyncMaster, handleSyncOpen, handleSyncMessage, handleSyncClose, getSyncStatus } from "./sync/index";
 import { autoWarmupScheduler } from "./auth/warmup-scheduler";
 import { db } from "./db/index";
 import { filterRules } from "./db/schema";
@@ -65,6 +66,9 @@ try {
 
 // Start auto-warmup scheduler (reads settings from DB)
 await autoWarmupScheduler.start();
+
+// Initialize sync system
+await initSync();
 
 // Create Hono app
 const app = new Hono();
@@ -165,6 +169,11 @@ app.post("/api/login", async (c) => {
   return c.json({ success: true, token: config.apiKey });
 });
 
+// Sync status endpoint
+app.get("/api/sync/status", async (c) => {
+  return c.json(getSyncStatus());
+});
+
 // Serve dashboard static files (SPA fallback)
 const dashboardDist = new URL("../dashboard/dist", import.meta.url).pathname;
 const dashboardIndex = `${dashboardDist}/index.html`;
@@ -190,8 +199,16 @@ const server = Bun.serve({
   async fetch(req, server) {
     // Handle WebSocket upgrade
     const url = new URL(req.url);
+
     if (url.pathname === "/ws") {
-      const upgraded = server.upgrade(req, { data: {} });
+      const upgraded = server.upgrade(req, { data: { type: "dashboard" } });
+      if (upgraded) return undefined;
+      return new Response("WebSocket upgrade failed", { status: 400 });
+    }
+
+    // Sync WebSocket endpoint (master only)
+    if (url.pathname === "/sync" && isSyncEnabled() && isSyncMaster()) {
+      const upgraded = server.upgrade(req, { data: { type: "sync" } });
       if (upgraded) return undefined;
       return new Response("WebSocket upgrade failed", { status: 400 });
     }
@@ -221,7 +238,35 @@ const server = Bun.serve({
 
     return new Response("Not Found", { status: 404 });
   },
-  websocket: websocketHandler,
+  websocket: {
+    open(ws: any) {
+      const data = ws.data as { type?: string };
+      if (data?.type === "sync") {
+        handleSyncOpen(ws);
+      } else {
+        websocketHandler.open(ws);
+      }
+    },
+    message(ws: any, message: string | Buffer) {
+      const data = ws.data as { type?: string };
+      if (data?.type === "sync") {
+        handleSyncMessage(ws, typeof message === "string" ? message : message.toString());
+      } else {
+        websocketHandler.message(ws, message);
+      }
+    },
+    close(ws: any) {
+      const data = ws.data as { type?: string };
+      if (data?.type === "sync") {
+        handleSyncClose(ws);
+      } else {
+        websocketHandler.close(ws);
+      }
+    },
+    drain(ws: any) {
+      websocketHandler.drain(ws);
+    },
+  },
 });
 
 console.log(`

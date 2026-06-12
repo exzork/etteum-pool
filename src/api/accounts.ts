@@ -10,6 +10,7 @@ import { warmupQueue } from "../auth/warmup-queue";
 import { warmupAccount } from "../auth/warmup-runner";
 import { pool, type ProviderName } from "../proxy/pool";
 import { activateQoderPat } from "../proxy/providers/qoder";
+import { emitDelta } from "../sync/index";
 
 export const accountsRouter = new Hono();
 

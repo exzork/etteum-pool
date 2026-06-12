@@ -4,6 +4,7 @@ import { client } from "../db/index";
 import { apiKeys } from "../db/schema";
 import { eq } from "drizzle-orm";
 import { config } from "../config";
+import { emitDelta } from "../sync/index";
 
 export const keysRouter = new Hono();
 
@@ -94,6 +95,7 @@ keysRouter.post("/", async (c) => {
 
   const key = body.key && body.key.length >= 16 ? body.key : generateApiKey();
   const [row] = await db.insert(apiKeys).values({ name: body.name.trim(), key }).returning();
+  emitDelta("api_keys", "upsert", row as Record<string, unknown>);
   return c.json({ data: row }, 201);
 });
 
@@ -124,6 +126,7 @@ keysRouter.delete("/:id", async (c) => {
 
   const deleted = await db.delete(apiKeys).where(eq(apiKeys.id, id)).returning();
   if (deleted.length === 0) return c.json({ error: "Key not found" }, 404);
+  emitDelta("api_keys", "delete", { id });
   return c.json({ success: true });
 });
 

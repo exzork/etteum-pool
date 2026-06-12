@@ -191,14 +191,18 @@ export default function Accounts() {
     setWarmupProgress(next);
   }
 
+  const warmupThrottleRef = useRef(false);
   const scheduleWarmupReload = () => {
-    if (warmupReloadRef.current) clearTimeout(warmupReloadRef.current);
-    warmupReloadRef.current = setTimeout(async () => {
+    // Throttle: fire at most once per 800ms (not debounce which starves on rapid events)
+    if (warmupThrottleRef.current) return;
+    warmupThrottleRef.current = true;
+    setTimeout(async () => {
+      warmupThrottleRef.current = false;
       try {
         const res = await fetchWarmupQueue();
         updateWarmupQueue(res);
       } catch {}
-    }, 500);
+    }, 800);
   };
 
   useEffect(() => () => {
@@ -224,10 +228,34 @@ export default function Accounts() {
 
   useWsEvent([
     "warmup_queue_added", "warmup_processing",
-    "warmup_complete", "warmup_success", "warmup_exhausted",
+    "warmup_success", "warmup_exhausted",
     "warmup_auth_error", "warmup_transient_error",
-    "warmup_queue_cleared"
   ], scheduleWarmupReload);
+
+  useWsEvent(["warmup_complete"], (msg) => {
+    const provider = msg.data?.provider;
+    if (provider) {
+      // Show 100% briefly before clearing
+      setWarmupProgress((prev) => {
+        const existing = prev[provider];
+        if (existing) return { ...prev, [provider]: { ...existing, completed: existing.total, active: 0 } };
+        return prev;
+      });
+      // Clear after 2s so user sees completion
+      setTimeout(() => {
+        setWarmupProgress((prev) => {
+          const next = { ...prev };
+          delete next[provider];
+          return next;
+        });
+      }, 2000);
+    }
+    scheduleReload();
+  });
+
+  useWsEvent(["warmup_queue_cleared"], () => {
+    setWarmupProgress({});
+  });
 
   useWsEvent(["account_status"], scheduleReload);
 
@@ -540,7 +568,13 @@ export default function Accounts() {
     try {
       const res = await warmupAllAccounts({ providers: [provider], statuses: ["active", "exhausted", "error"] }) as any;
       showSuccess(res.message || `${labelProvider(provider)} WarmUp queued.`);
-      await load();
+      // Immediately set progress to show the bar (don't wait for WS event / fetch)
+      const count = res.count || 0;
+      if (count > 0) {
+        setWarmupProgress((prev) => ({ ...prev, [provider]: { total: count, completed: 0, active: 0 } }));
+      }
+      // Delay load slightly to let server finish enqueueing before we fetch progress
+      setTimeout(() => { load(); }, 300);
     } catch (err) { showError(err); }
   }
 
@@ -786,8 +820,8 @@ export default function Accounts() {
                 />
               </div>
 
-              {/* WarmUp progress - hide when completed */}
-              {warmupProgress[stat.provider] && warmupProgress[stat.provider].completed < warmupProgress[stat.provider].total && (
+              {/* WarmUp progress - shown while warmup is active */}
+              {warmupProgress[stat.provider] && warmupProgress[stat.provider].total > 0 && (
                 <div className="space-y-1.5">
                   <div className="flex justify-between text-xs">
                     <span className="text-[var(--muted-foreground)]">WarmUp</span>

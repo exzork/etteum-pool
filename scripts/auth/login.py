@@ -21,9 +21,11 @@ from app.errors.codes import ErrorCode
 from app.errors.exceptions import BatcherError, RetryableBatcherError
 
 MAX_RETRIES = 3
+CODEBUDDY_MAX_RETRIES = 5  # More retries for codebuddy (browser crashes are common)
 BASE_DELAY = 2.0
 MAX_DELAY = 15.0
 PROVIDER_TIMEOUT = 180
+CODEBUDDY_TIMEOUT = 600  # 10 minutes — codebuddy has its own inactivity-based timeout (150s no-progress), so this outer timeout is just a safety net
 KIRO_PRO_TIMEOUT = 600  # 10 minutes for kiro-pro (upgrade + payment takes longer)
 
 
@@ -75,7 +77,7 @@ async def _run_provider_once(adapter, account: NormalizedAccount) -> dict:
         quota = None
         try:
             quota = await adapter.fetch_quota(account, tokens, session)
-            quota_msg = "Quota fetched"
+            quota_msg = "Quota fetched (pending server-side sync)"
             if isinstance(quota, dict):
                 if quota.get("gift_claimed"):
                     gift_credits = quota.get("gift_credits", 0)
@@ -105,6 +107,8 @@ async def _run_provider_once(adapter, account: NormalizedAccount) -> dict:
                     quota_msg = f"Quota fetched: {float(total):.0f} credits total"
                 elif remain is not None:
                     quota_msg = f"Quota fetched: {float(remain):.0f} credits remaining"
+            else:
+                quota_msg = "Quota: browser fetch failed (will sync via API key)"
             emit(
                 {
                     "type": "progress",
@@ -187,9 +191,11 @@ async def run_provider(adapter, account: NormalizedAccount) -> dict:
         }
     )
 
-    for attempt in range(MAX_RETRIES):
+    max_retries = CODEBUDDY_MAX_RETRIES if provider_name == "codebuddy" else MAX_RETRIES
+
+    for attempt in range(max_retries):
         try:
-            timeout = KIRO_PRO_TIMEOUT if provider_name == "kiro-pro" else PROVIDER_TIMEOUT
+            timeout = KIRO_PRO_TIMEOUT if provider_name == "kiro-pro" else CODEBUDDY_TIMEOUT if provider_name == "codebuddy" else PROVIDER_TIMEOUT
             return await asyncio.wait_for(
                 _run_provider_once(adapter, account), timeout=timeout
             )
@@ -210,14 +216,14 @@ async def run_provider(adapter, account: NormalizedAccount) -> dict:
                     "provider": provider_name,
                     "error": f"timed out after {timeout}s",
                 }
-            if attempt < MAX_RETRIES - 1:
+            if attempt < max_retries - 1:
                 delay = retry_delay(attempt)
                 emit(
                     {
                         "type": "progress",
                         "provider": provider_name,
                         "step": "retry",
-                        "message": f"Timeout after {timeout}s — retrying in {delay:.0f}s (attempt {attempt + 2}/{MAX_RETRIES})",
+                        "message": f"Timeout after {timeout}s — retrying in {delay:.0f}s (attempt {attempt + 2}/{max_retries})",
                     }
                 )
                 await asyncio.sleep(delay)
@@ -236,14 +242,14 @@ async def run_provider(adapter, account: NormalizedAccount) -> dict:
                 }
         except RetryableBatcherError as e:
             last_error = e
-            if attempt < MAX_RETRIES - 1:
+            if attempt < max_retries - 1:
                 delay = retry_delay(attempt)
                 emit(
                     {
                         "type": "progress",
                         "provider": provider_name,
                         "step": "retry",
-                        "message": f"Retryable error: {e.message} — retrying in {delay:.0f}s (attempt {attempt + 2}/{MAX_RETRIES})",
+                        "message": f"Retryable error: {e.message} — retrying in {delay:.0f}s (attempt {attempt + 2}/{max_retries})",
                     }
                 )
                 await asyncio.sleep(delay)
@@ -269,14 +275,14 @@ async def run_provider(adapter, account: NormalizedAccount) -> dict:
             return {"success": False, "provider": provider_name, "error": e.message}
         except Exception as e:
             last_error = e
-            if attempt < MAX_RETRIES - 1:
+            if attempt < max_retries - 1:
                 delay = retry_delay(attempt)
                 emit(
                     {
                         "type": "progress",
                         "provider": provider_name,
                         "step": "retry",
-                        "message": f"Error: {e} — retrying in {delay:.0f}s (attempt {attempt + 2}/{MAX_RETRIES})",
+                        "message": f"Error: {e} — retrying in {delay:.0f}s (attempt {attempt + 2}/{max_retries})",
                     }
                 )
                 await asyncio.sleep(delay)

@@ -49,13 +49,15 @@ export function isNonAccountRequestError(error?: string): boolean {
 
 /**
  * Transient errors that are temporary and should not permanently mark an account as errored.
- * These include network issues, timeouts, and other temporary failures.
+ * These include network issues, timeouts, rate limits, upstream server errors,
+ * and bad-request errors that are caused by the request format (not the account).
  * Account stays "active" but error is logged.
  */
 export function isTransientError(error?: string): boolean {
   if (!error) return false;
   const normalized = error.toLowerCase();
   return (
+    // Network / connectivity
     normalized.includes("timeout") ||
     normalized.includes("etimedout") ||
     normalized.includes("request timeout") ||
@@ -69,6 +71,27 @@ export function isTransientError(error?: string): boolean {
     normalized.includes("connection") ||
     normalized.includes("aborted") ||
     normalized.includes("eai again") ||
-    normalized.includes("temporary failure")
+    normalized.includes("temporary failure") ||
+    // Upstream server errors (not account-specific)
+    normalized.includes("(500)") ||
+    normalized.includes("(502)") ||
+    normalized.includes("(503)") ||
+    normalized.includes("(504)") ||
+    normalized.includes("internal server error") ||
+    normalized.includes("bad gateway") ||
+    normalized.includes("service unavailable") ||
+    normalized.includes("gateway timeout") ||
+    // Rate limiting (temporary)
+    normalized.includes("rate limit") ||
+    normalized.includes("too many requests") ||
+    normalized.includes("(429)") ||
+    // Bad request format (not account issue — request content caused it)
+    normalized.includes("parse message failed") ||
+    normalized.includes("invalid request") ||
+    normalized.includes("(400)") ||
+    // Stream errors (temporary)
+    normalized.includes("stream error") ||
+    normalized.includes("stream read timeout") ||
+    normalized.includes("stream failed")
   );
 }

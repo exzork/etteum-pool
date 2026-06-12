@@ -312,14 +312,20 @@ export class CodeBuddyProvider extends BaseProvider {
       const promptTokens = data.usage.prompt_tokens || 0;
       const completionTokens = data.usage.completion_tokens || 0;
       const totalTokens = data.usage.total_tokens || 0;
+      // Use real credit from CodeBuddy if available, otherwise estimate
+      const realCredit = (data as any)._realCredit;
+      const creditsUsed = realCredit != null ? realCredit : (totalTokens > 0 ? totalTokens * this.getProviderCreditRate(request.model) : 0);
+      const creditSource: "upstream" | "estimated" = realCredit != null ? "upstream" : "estimated";
+      // Remove internal field before sending to client
+      delete (data as any)._realCredit;
       return {
         success: true,
         response: data,
         tokensUsed: totalTokens,
         promptTokens,
         completionTokens,
-        creditsUsed: totalTokens > 0 ? totalTokens * this.getProviderCreditRate(request.model) : 0,
-        creditSource: "estimated",
+        creditsUsed,
+        creditSource,
       };
     } catch (error) {
       return { success: false, error: `CodeBuddy request failed: ${error instanceof Error ? error.message : String(error)}` };
@@ -413,20 +419,38 @@ export class CodeBuddyProvider extends BaseProvider {
       return { kind: "missing_tokens", success: false, error: "No CodeBuddy tokens or cookies available" };
     }
 
-    // The only source of truth: can this account make actual API requests?
+    // Primary check: fetch real billing data via /v2/billing/meter/get-user-resource
+    // This endpoint works with API key and gives us both auth validation AND real credit data.
+    const quota = await this.fetchQuota(account);
+    if (quota.success && quota.quota) {
+      return {
+        kind: quota.quota.remaining <= 0 ? "exhausted" : "healthy",
+        success: true,
+        quota: { ...quota.quota, source: "codebuddy.get-user-resource" },
+        metadata: {
+          credit_total_dosage: quota.quota.limit,
+          credit_capacity_remain: quota.quota.remaining,
+          credit_capacity_used: quota.quota.used,
+          credit_capacity_size: quota.quota.limit,
+          lastRealBillingSync: new Date().toISOString(),
+        },
+      };
+    }
+
+    // Billing API failed — check if it's an auth issue or transient error
+    if (quota.error?.includes("401") || quota.error?.includes("403")) {
+      return {
+        kind: "session_expired",
+        success: false,
+        error: "CodeBuddy API key expired or revoked (billing returned 401/403)",
+      };
+    }
+
+    // Fallback: validate via chat completions endpoint
     const apiStatus = await this.validateApiKey(tokens);
 
     if (apiStatus === "ok") {
-      // API works - account is healthy. Try billing for credit info (best-effort).
-      const quota = await this.fetchQuota(account);
-      if (quota.success && quota.quota) {
-        return {
-          kind: quota.quota.remaining <= 0 ? "exhausted" : "healthy",
-          success: true,
-          quota: { ...quota.quota, source: "codebuddy.get-user-resource" },
-        };
-      }
-      // Billing failed but API works - use stored quota, account is healthy
+      // API works but billing failed (transient) — report as healthy with stored quota
       const storedQuota = Number(account.quotaRemaining || 0);
       const storedLimit = Number(account.quotaLimit || 0);
       return {
@@ -435,7 +459,7 @@ export class CodeBuddyProvider extends BaseProvider {
         quota: storedLimit > 0
           ? { limit: storedLimit, remaining: storedQuota, used: storedLimit - storedQuota, source: "tracked" }
           : undefined,
-        message: `API key valid. Credit: ${storedQuota.toFixed(1)}/${storedLimit.toFixed(1)} (tracked)`,
+        message: `Billing API transient error (${quota.error}). Using tracked credit: ${storedQuota.toFixed(1)}/${storedLimit.toFixed(1)}`,
       };
     }
 
@@ -453,13 +477,31 @@ export class CodeBuddyProvider extends BaseProvider {
 
   /**
    * Check if the api_key can make actual requests to the provider.
-   * Uses stream: true and aborts immediately after HTTP status to avoid consuming quota.
+   * Uses the billing API endpoint which validates the API key without consuming credits.
+   * Falls back to chat completions endpoint if billing check fails.
    * Returns: "ok" | "quota_exhausted" | "expired"
    */
   private async validateApiKey(tokens: CodeBuddyTokens): Promise<"ok" | "quota_exhausted" | "expired"> {
     const apiKey = tokens.api_key || tokens.access_token || tokens.session_token;
     if (!apiKey) return "expired";
 
+    // Primary: use billing API to validate — doesn't consume credits and gives definitive auth status
+    try {
+      const response = await this.fetchUserResource(tokens);
+      if (response.status === 401 || response.status === 403) return "expired";
+      if (response.status === 429) return "quota_exhausted";
+      if (response.ok) {
+        const data = await response.json() as any;
+        if (data.code === 0) return "ok";
+        // Non-zero code but HTTP 200 — API key is valid, just a business logic error
+        return "ok";
+      }
+      // Other HTTP errors — fall through to chat endpoint check
+    } catch {
+      // Network error on billing — fall through to chat endpoint check
+    }
+
+    // Fallback: use chat completions endpoint (abort immediately after status)
     const controller = new AbortController();
     try {
       const response = await fetch(`${this.baseUrl}/v2/chat/completions`, {
@@ -525,9 +567,20 @@ export class CodeBuddyProvider extends BaseProvider {
       PackageEndTimeRangeEnd: endDate.toISOString().replace("T", " ").slice(0, 19),
     };
 
-    return this.fetchWithTimeout(`${this.baseUrl}/billing/meter/get-user-resource`, {
+    // Use /v2/billing/meter/get-user-resource which works with API key (Bearer token).
+    // The old /billing/meter/get-user-resource requires web session cookies that expire.
+    const apiKey = tokens.api_key || tokens.access_token || tokens.session_token;
+    const headers: Record<string, string> = {
+      "Accept": "application/json, text/plain, */*",
+      "Content-Type": "application/json",
+      "X-Requested-With": "XMLHttpRequest",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    };
+    if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+
+    return this.fetchWithTimeout(`${this.baseUrl}/v2/billing/meter/get-user-resource`, {
       method: "POST",
-      headers: this.buildAuthHeaders(tokens),
+      headers,
       body: JSON.stringify(payload),
     }, config.providerQuotaTimeoutMs);
   }
@@ -726,6 +779,12 @@ export class CodeBuddyProvider extends BaseProvider {
       cleanedMessages.push(msg);
     }
 
+    // CodeBuddy requires a system message — inject one if missing to avoid "Parse message failed"
+    const hasSystemMsg = cleanedMessages.some((m: any) => m.role === "system");
+    if (!hasSystemMsg) {
+      cleanedMessages.unshift({ role: "system", content: "You are a helpful AI assistant." });
+    }
+
     const body: Record<string, unknown> = {
       messages: cleanedMessages,
       model: actualModel,
@@ -760,7 +819,7 @@ export class CodeBuddyProvider extends BaseProvider {
     }, timeoutMs);
   }
 
-  private async aggregateStreamResponse(response: Response, model: string): Promise<ChatCompletionResponse> {
+  private async aggregateStreamResponse(response: Response, model: string): Promise<ChatCompletionResponse & { _realCredit?: number }> {
     const reader = response.body?.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -769,6 +828,7 @@ export class CodeBuddyProvider extends BaseProvider {
     let id = this.generateId();
     let finishReason: string | null = "stop";
     let usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+    let realCredit: number | null = null; // Real credit from CodeBuddy usage.credit field
 
     if (!reader) {
       return {
@@ -844,6 +904,10 @@ export class CodeBuddyProvider extends BaseProvider {
               completion_tokens: Number(chunk.usage.completion_tokens || chunk.usage.output_tokens || usage.completion_tokens || 0),
               total_tokens: Number(chunk.usage.total_tokens || usage.total_tokens || 0),
             };
+            // Capture real credit from CodeBuddy's usage.credit field
+            if (chunk.usage.credit != null && Number(chunk.usage.credit) > 0) {
+              realCredit = Number(chunk.usage.credit);
+            }
           }
 
 
@@ -878,6 +942,7 @@ export class CodeBuddyProvider extends BaseProvider {
       model,
       choices: [{ index: 0, message, finish_reason: finishReason || "stop" }],
       usage,
+      ...(realCredit != null ? { _realCredit: realCredit } : {}),
     };
   }
 
@@ -897,6 +962,7 @@ export class CodeBuddyProvider extends BaseProvider {
     const id = this.generateId();
     const encoder = new TextEncoder();
     let capturedUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+    let capturedRealCredit: number | null = null; // Real credit from CodeBuddy usage.credit
 
     const STREAM_READ_TIMEOUT = 300_000; // 5 minutes per read — generous for thinking models
 
@@ -995,6 +1061,10 @@ export class CodeBuddyProvider extends BaseProvider {
                     completion_tokens: Number(parsed.usage.completion_tokens || parsed.usage.output_tokens || capturedUsage.completion_tokens || 0),
                     total_tokens: Number(parsed.usage.total_tokens || capturedUsage.total_tokens || 0),
                   };
+                  // Capture real credit from CodeBuddy's usage.credit field
+                  if (parsed.usage.credit != null && Number(parsed.usage.credit) > 0) {
+                    capturedRealCredit = Number(parsed.usage.credit);
+                  }
                 }
 
                 controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
@@ -1037,8 +1107,11 @@ export class CodeBuddyProvider extends BaseProvider {
       tokensUsed: capturedUsage.total_tokens,
       promptTokens: capturedUsage.prompt_tokens,
       completionTokens: capturedUsage.completion_tokens,
-      creditsUsed: capturedUsage.total_tokens > 0 ? capturedUsage.total_tokens * this.getProviderCreditRate(model) : 0,
-      creditSource: "estimated",
+      // Note: For streaming, the real credit is captured by the stream finalizer in index.ts
+      // via extractUsageFromSsePayload() which reads usage.credit from the last SSE chunk.
+      // These fallback values are used only if the finalizer doesn't find usage in the stream.
+      creditsUsed: 0,
+      creditSource: "estimated" as const,
     };
   }
 }

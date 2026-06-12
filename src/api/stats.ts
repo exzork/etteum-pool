@@ -181,9 +181,9 @@ statsRouter.get("/usage", async (c) => {
   const bucketExpr =
     isAll
       ? summaryBucketExpr("month", timeZone)
-      : hours <= 24
+      : hours <= 48
       ? summaryBucketExpr("hour", timeZone)
-      : hours <= 24 * 30
+      : hours <= 24 * 32
         ? summaryBucketExpr("day", timeZone)
         : summaryBucketExpr("month", timeZone);
 

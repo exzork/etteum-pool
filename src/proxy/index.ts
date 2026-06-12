@@ -158,7 +158,7 @@ function extractUsageFromSsePayload(payload: string) {
       promptTokens: Number(usage?.prompt_tokens || usage?.input_tokens || 0),
       completionTokens: Number(usage?.completion_tokens || usage?.output_tokens || 0),
       totalTokens: Number(usage?.total_tokens || 0),
-      creditsUsed: Number(usage?.credits_used || usage?.creditsUsed || parsed.credits_used || parsed.creditsUsed || 0),
+      creditsUsed: Number(usage?.credits_used || usage?.creditsUsed || usage?.credit || parsed.credits_used || parsed.creditsUsed || 0),
     };
   } catch {
     return null;

@@ -107,7 +107,7 @@ function formatLabel(epoch: number, period: string): string {
  * Generate ordered bucket epochs for the chart, all in the user's local
  * timezone so labels read naturally.
  *
- * - **1d** — 25 hourly buckets for *today* (00:00 → 00:00 next day).
+ * - **1d** — 25 hourly buckets as a rolling 24h window (now-24h → now).
  * - **7d** — 7 daily buckets ending today.
  * - **30d** — 30 daily buckets ending today.
  * - **all** — last 12 monthly buckets.
@@ -117,6 +117,7 @@ function generateBuckets(period: string): number[] {
   const buckets: number[] = [];
 
   if (period === "1d") {
+    // Full calendar day: 00:00 → 00:00 (today)
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
     for (let i = 0; i <= 24; i++) {
       buckets.push(todayStart + i * 3600_000);

@@ -232,9 +232,11 @@ class WarmupQueue {
         for (const provider of Object.keys(this.progressByProvider)) {
           broadcast({
             type: "warmup_complete",
-            data: { provider },
+            data: { provider, ...this.progressByProvider[provider] },
           });
         }
+        // Clear progress after completion so next fetch doesn't get stale data
+        this.progressByProvider = {};
       }
     }
   }

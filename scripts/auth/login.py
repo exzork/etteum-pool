@@ -25,6 +25,7 @@ CODEBUDDY_MAX_RETRIES = 5  # More retries for codebuddy (browser crashes are com
 BASE_DELAY = 2.0
 MAX_DELAY = 15.0
 PROVIDER_TIMEOUT = 180
+CODEBUDDY_TIMEOUT = 600  # 10 minutes — codebuddy has its own inactivity-based timeout (150s no-progress), so this outer timeout is just a safety net
 KIRO_PRO_TIMEOUT = 600  # 10 minutes for kiro-pro (upgrade + payment takes longer)
 
 
@@ -194,7 +195,7 @@ async def run_provider(adapter, account: NormalizedAccount) -> dict:
 
     for attempt in range(max_retries):
         try:
-            timeout = KIRO_PRO_TIMEOUT if provider_name == "kiro-pro" else PROVIDER_TIMEOUT
+            timeout = KIRO_PRO_TIMEOUT if provider_name == "kiro-pro" else CODEBUDDY_TIMEOUT if provider_name == "codebuddy" else PROVIDER_TIMEOUT
             return await asyncio.wait_for(
                 _run_provider_once(adapter, account), timeout=timeout
             )

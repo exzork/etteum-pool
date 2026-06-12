@@ -16,6 +16,7 @@ import { prepareLogBody } from "./logging";
 import { resolveModelAlias } from "./model-mapping";
 import { eq, sql } from "drizzle-orm";
 import { providerList, refreshByokModels } from "./providers/registry";
+import type { ResolvedApiKey } from "../api/keys";
 
 export const proxyRouter = new Hono();
 
@@ -31,17 +32,19 @@ async function upsertUsageSummary(entry: {
   totalTokens: number;
   creditsUsed: number;
   durationMs: number;
+  apiKeyId?: number;
+  apiKeyName?: string;
 }) {
   try {
     const bucket = new Date();
     bucket.setMinutes(0, 0, 0); // truncate to hour
 
     await db.run(sql`
-      INSERT INTO usage_summary (bucket, provider, model, total_requests, success_requests, error_requests, prompt_tokens, completion_tokens, total_tokens, credits_used, total_duration_ms)
+      INSERT INTO usage_summary (bucket, provider, model, total_requests, success_requests, error_requests, prompt_tokens, completion_tokens, total_tokens, credits_used, total_duration_ms, api_key_id, api_key_name)
       VALUES (${bucket.toISOString()}, ${entry.provider || "unknown"}, ${entry.model || "unknown"}, 1,
         ${entry.status === "success" ? 1 : 0}, ${entry.status === "error" ? 1 : 0},
         ${entry.promptTokens || 0}, ${entry.completionTokens || 0}, ${entry.totalTokens || 0},
-        ${entry.creditsUsed || 0}, ${entry.durationMs || 0})
+        ${entry.creditsUsed || 0}, ${entry.durationMs || 0}, ${entry.apiKeyId || null}, ${entry.apiKeyName || null})
       ON CONFLICT (bucket, provider, model) DO UPDATE SET
         total_requests = usage_summary.total_requests + excluded.total_requests,
         success_requests = usage_summary.success_requests + excluded.success_requests,
@@ -451,7 +454,7 @@ function wrapStreamWithUsageFinalizer(
   });
 }
 
-async function handleChatCompletion(body: ChatCompletionRequest) {
+async function handleChatCompletion(body: ChatCompletionRequest, apiKey?: ResolvedApiKey) {
   // Rewrite the incoming model id to its mapped target (CLI integration, e.g.
   // Claude Code's hardcoded haiku/sonnet/opus ids -> a model in the pool).
   body = { ...body, model: resolveModelAlias(normalizeModelId(body.model)) };
@@ -512,6 +515,8 @@ async function handleChatCompletion(body: ChatCompletionRequest) {
     responseBody: prepareLogBody(result.response),
     accountQuotaBefore: quotaBefore,
     accountQuotaAfter: quotaAfter,
+    apiKeyId: apiKey?.id || null,
+    apiKeyName: apiKey?.name || null,
   };
 
     if (isStream && result.stream) {
@@ -621,7 +626,8 @@ proxyRouter.post("/v1/chat/completions", async (c) => {
   const isStream = body.stream === true;
 
   try {
-    const { result } = await handleChatCompletion(body);
+    const apiKey = c.get("apiKey" as any) as ResolvedApiKey | undefined;
+    const { result } = await handleChatCompletion(body, apiKey);
 
     if (isStream && result.stream) {
       // Return SSE stream
@@ -701,7 +707,8 @@ proxyRouter.post("/v1/messages", async (c) => {
   const openAIRequest = anthropicToOpenAI(body);
 
   try {
-    const { result } = await handleChatCompletion(openAIRequest);
+    const apiKey = c.get("apiKey" as any) as ResolvedApiKey | undefined;
+    const { result } = await handleChatCompletion(openAIRequest, apiKey);
 
     if (body.stream === true && result.stream) {
       return new Response(openAIStreamToAnthropic(result.stream, body), {

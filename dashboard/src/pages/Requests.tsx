@@ -4,7 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Search, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { fetchRequests } from "@/lib/api";
+import { fetchRequests, fetchAllApiKeys, type ApiKeyEntry } from "@/lib/api";
 import { formatDateTimeID } from "@/lib/utils";
 import { useWsEvent } from "@/hooks/useWebSocket";
 
@@ -26,6 +26,8 @@ interface RequestLog {
   errorMessage: string | null;
   requestBody?: unknown;
   responseBody?: unknown;
+  apiKeyId?: number | null;
+  apiKeyName?: string | null;
 }
 
 function getCreditMeta(req: RequestLog) {
@@ -47,15 +49,21 @@ export default function Requests() {
   const [logs, setLogs] = useState<RequestLog[]>([]);
   const [search, setSearch] = useState("");
   const [provider, setProvider] = useState("all");
+  const [apiKeyFilter, setApiKeyFilter] = useState<number>(0); // 0 = all
+  const [apiKeys, setApiKeys] = useState<ApiKeyEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<RequestLog | null>(null);
   const [page, setPage] = useState(1);
   const perPage = 25;
 
+  useEffect(() => {
+    fetchAllApiKeys().then((res) => setApiKeys(res.data || [])).catch(() => {});
+  }, []);
+
   async function load() {
     setLoading(true);
     try {
-      const res = await fetchRequests(1, 100, provider) as { data: RequestLog[] };
+      const res = await fetchRequests(1, 100, provider, apiKeyFilter || undefined) as { data: RequestLog[] };
       setLogs(res.data || []);
     } catch {
       setLogs([]);
@@ -67,7 +75,7 @@ export default function Requests() {
   useEffect(() => {
     load();
     setPage(1);
-  }, [provider]);
+  }, [provider, apiKeyFilter]);
 
   useEffect(() => {
     setPage(1);
@@ -85,6 +93,7 @@ export default function Requests() {
       req.model?.toLowerCase().includes(q) ||
       req.provider.toLowerCase().includes(q) ||
       req.errorMessage?.toLowerCase().includes(q) ||
+      req.apiKeyName?.toLowerCase().includes(q) ||
       String(req.accountId || "").includes(q)
     );
   });
@@ -95,7 +104,7 @@ export default function Requests() {
         <div>
           <h1 className="text-2xl font-bold text-[var(--foreground)]">Requests</h1>
           <p className="text-sm text-[var(--muted-foreground)] mt-1">
-            Recent API request logs from PostgreSQL
+            Recent API request logs
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={load} disabled={loading}>
@@ -113,6 +122,14 @@ export default function Requests() {
           <option value="kiro">Kiro</option>
           <option value="codebuddy">CodeBuddy</option>
           <option value="canva">Canva</option>
+          <option value="codex">Codex</option>
+          <option value="qoder">Qoder</option>
+        </select>
+        <select value={apiKeyFilter} onChange={(e) => setApiKeyFilter(Number(e.target.value))} className="h-9 rounded-md border border-[var(--border)] bg-[var(--background)] px-3 text-sm text-[var(--foreground)]">
+          <option value={0}>All API Keys</option>
+          {apiKeys.map((k) => (
+            <option key={k.id} value={k.id}>{k.name}</option>
+          ))}
         </select>
       </div>
 
@@ -129,7 +146,8 @@ export default function Requests() {
                   <th className="text-left text-xs font-medium text-[var(--muted-foreground)] uppercase tracking-wide p-4 hidden md:table-cell">Duration</th>
                   <th className="text-left text-xs font-medium text-[var(--muted-foreground)] uppercase tracking-wide p-4 hidden lg:table-cell">Tokens</th>
                   <th className="text-left text-xs font-medium text-[var(--muted-foreground)] uppercase tracking-wide p-4 hidden lg:table-cell">Credits</th>
-                  <th className="text-left text-xs font-medium text-[var(--muted-foreground)] uppercase tracking-wide p-4 hidden lg:table-cell">Account</th>
+                  <th className="text-left text-xs font-medium text-[var(--muted-foreground)] uppercase tracking-wide p-4 hidden lg:table-cell">API Key</th>
+                  <th className="text-left text-xs font-medium text-[var(--muted-foreground)] uppercase tracking-wide p-4 hidden xl:table-cell">Account</th>
                 </tr>
               </thead>
               <tbody>
@@ -142,11 +160,16 @@ export default function Requests() {
                     <td className="p-4 text-sm text-[var(--muted-foreground)] hidden md:table-cell">{((req.durationMs ?? 0) / 1000).toFixed(1)}s</td>
                     <td className="p-4 text-xs text-[var(--muted-foreground)] hidden lg:table-cell">{req.totalTokens || 0}</td>
                     <td className="p-4 text-xs text-[var(--muted-foreground)] hidden lg:table-cell">{Number(req.creditsUsed || 0).toFixed(2)}</td>
-                    <td className="p-4 text-xs text-[var(--muted-foreground)] hidden lg:table-cell">{req.accountEmail || (req.accountId ? `#${req.accountId}` : "-")}</td>
+                    <td className="p-4 text-xs text-[var(--muted-foreground)] hidden lg:table-cell">
+                      {req.apiKeyName ? (
+                        <Badge variant="success" className="text-[10px]">{req.apiKeyName}</Badge>
+                      ) : "-"}
+                    </td>
+                    <td className="p-4 text-xs text-[var(--muted-foreground)] hidden xl:table-cell">{req.accountEmail || (req.accountId ? `#${req.accountId}` : "-")}</td>
                   </tr>
                 ))}
                 {!loading && filtered.length === 0 && (
-                  <tr><td colSpan={8} className="p-8 text-center text-sm text-[var(--muted-foreground)]">No request logs yet</td></tr>
+                  <tr><td colSpan={9} className="p-8 text-center text-sm text-[var(--muted-foreground)]">No request logs yet</td></tr>
                 )}
               </tbody>
             </table>
@@ -182,6 +205,9 @@ export default function Requests() {
               <span className="text-[var(--muted-foreground)]">HTTP {selected.status === "success" ? 200 : 503}</span>
               <span className="text-[var(--muted-foreground)]">{((selected.durationMs || 0) / 1000).toFixed(1)}s</span>
               <span className="text-[var(--muted-foreground)]">{labelProvider(selected.provider)}</span>
+              {selected.apiKeyName && (
+                <Badge variant="success" className="text-[10px]">{selected.apiKeyName}</Badge>
+              )}
             </div>
 
             <div className="mt-4 grid grid-cols-4 gap-2">
@@ -202,6 +228,13 @@ export default function Requests() {
               <p className="text-sm font-medium text-[var(--foreground)]">{selected.accountEmail || `#${selected.accountId}`}</p>
               <p className="text-xs text-[var(--muted-foreground)]">Credit: {selected.accountQuotaBefore ?? 0} → {selected.accountQuotaAfter ?? 0}</p>
             </div>
+
+            {selected.apiKeyName && (
+              <div className="mt-5 space-y-1">
+                <p className="text-xs uppercase text-[var(--muted-foreground)]">API Key</p>
+                <p className="text-sm font-medium text-[var(--foreground)]">{selected.apiKeyName}</p>
+              </div>
+            )}
 
             {selected.errorMessage && (
               <div className="mt-5 rounded-md bg-[var(--error)]/10 p-3 text-sm text-[var(--error)]">{selected.errorMessage}</div>

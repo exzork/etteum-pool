@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { db } from "../db/index";
 import { requestLogs, accounts, usageSummary } from "../db/schema";
-import { desc, sql, eq } from "drizzle-orm";
+import { desc, sql, eq, and } from "drizzle-orm";
 import { pool } from "../proxy/pool";
 import { config } from "../config";
 import { getAllModels } from "../proxy/router";
@@ -103,9 +103,14 @@ statsRouter.get("/requests", async (c) => {
   const limit = clampNumber(c.req.query("limit"), 50, 1, 500);
   const offset = clampNumber(c.req.query("offset"), 0, 0, 100_000);
   const provider = c.req.query("provider");
+  const apiKeyId = c.req.query("apiKeyId");
 
-  const baseQuery = provider
-    ? db.select().from(requestLogs).where(eq(requestLogs.provider, provider))
+  let whereConditions = [];
+  if (provider) whereConditions.push(eq(requestLogs.provider, provider));
+  if (apiKeyId) whereConditions.push(eq(requestLogs.apiKeyId, Number(apiKeyId)));
+
+  const baseQuery = whereConditions.length > 0
+    ? db.select().from(requestLogs).where(and(...whereConditions))
     : db.select().from(requestLogs);
 
   const logs = await baseQuery

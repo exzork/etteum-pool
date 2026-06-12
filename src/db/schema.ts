@@ -39,6 +39,8 @@ export const requestLogs = sqliteTable("request_logs", {
   accountEmail: text("account_email"),
   accountQuotaBefore: real("account_quota_before").default(0),
   accountQuotaAfter: real("account_quota_after").default(0),
+  apiKeyId: integer("api_key_id"),
+  apiKeyName: text("api_key_name"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
 }, (table) => [
   index("request_logs_created_at_idx").on(table.createdAt),
@@ -46,6 +48,7 @@ export const requestLogs = sqliteTable("request_logs", {
   index("request_logs_provider_created_at_idx").on(table.provider, table.createdAt),
   index("request_logs_provider_model_status_idx").on(table.provider, table.model, table.status),
   index("request_logs_account_idx").on(table.accountId),
+  index("request_logs_api_key_idx").on(table.apiKeyId),
 ]);
 
 export const settings = sqliteTable("settings", {
@@ -62,6 +65,8 @@ export const usageSummary = sqliteTable("usage_summary", {
   bucket: text("bucket").notNull(), // start of hour (UTC), ISO-8601 string
   provider: text("provider").notNull(),
   model: text("model").notNull(),
+  apiKeyId: integer("api_key_id"),
+  apiKeyName: text("api_key_name"),
   totalRequests: integer("total_requests").default(0),
   successRequests: integer("success_requests").default(0),
   errorRequests: integer("error_requests").default(0),
@@ -74,6 +79,7 @@ export const usageSummary = sqliteTable("usage_summary", {
   uniqueIndex("usage_summary_bucket_provider_model_idx").on(table.bucket, table.provider, table.model),
   index("usage_summary_bucket_idx").on(table.bucket),
   index("usage_summary_provider_idx").on(table.provider, table.bucket),
+  index("usage_summary_api_key_idx").on(table.apiKeyId),
 ]);
 
 export const vccCards = sqliteTable("vcc_cards", {
@@ -183,7 +189,16 @@ export const modelMappings = sqliteTable("model_mappings", {
   index("model_mappings_priority_idx").on(table.priority),
 ]);
 
+export const apiKeys = sqliteTable("api_keys", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  key: text("key").notNull().unique(),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+});
+
 // Type exports
+export type ApiKey = typeof apiKeys.$inferSelect;
+export type NewApiKey = typeof apiKeys.$inferInsert;
 export type Account = typeof accounts.$inferSelect;
 export type NewAccount = typeof accounts.$inferInsert;
 export type RequestLog = typeof requestLogs.$inferSelect;

@@ -26,6 +26,24 @@ function getApiKey(): string {
   return localStorage.getItem("api_key") || "REDACTED";
 }
 
+export async function loginWithPassword(password: string): Promise<{ success: boolean; error?: string }> {
+  try {
+    const res = await fetch(`${API_BASE}/api/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    });
+    const data = await res.json();
+    if (res.ok && data.success && data.token) {
+      localStorage.setItem("api_key", data.token);
+      return { success: true };
+    }
+    return { success: false, error: data.error || "Invalid password" };
+  } catch {
+    return { success: false, error: "Connection failed" };
+  }
+}
+
 export async function validateApiKey(key: string): Promise<boolean> {
   try {
     const res = await fetch(`${API_BASE}/api/keys/test`, {
@@ -191,12 +209,13 @@ export async function fetchAutoWarmupStatus(): Promise<AutoWarmupStatus> {
   return fetchApi<AutoWarmupStatus>("/api/auth/warmup-schedule");
 }
 
-export async function fetchRequests(page: number = 1, limit: number = 50, provider?: string) {
+export async function fetchRequests(page: number = 1, limit: number = 50, provider?: string, apiKeyId?: number) {
   const safeLimit = clampLimit(limit, 50, 1, 500);
   const safePage = clampLimit(page, 1, 1, 1000);
   const offset = (safePage - 1) * safeLimit;
   const params = new URLSearchParams({ limit: String(safeLimit), offset: String(offset) });
   if (provider && provider !== "all") params.set("provider", provider);
+  if (apiKeyId && apiKeyId > 0) params.set("apiKeyId", String(apiKeyId));
   return fetchApi(`/api/stats/requests?${params.toString()}`);
 }
 
@@ -436,6 +455,40 @@ export async function clearAuthLogs() {
 
 export async function fetchApiKey() {
   return fetchApi("/api/keys");
+}
+
+export interface ApiKeyEntry {
+  id: number;
+  name: string;
+  key: string;
+  source: string;
+  createdAt: string | null;
+}
+
+export async function fetchAllApiKeys(): Promise<{ data: ApiKeyEntry[] }> {
+  return fetchApi("/api/keys");
+}
+
+export async function createApiKey(name: string, key?: string) {
+  return fetchApi("/api/keys", {
+    method: "POST",
+    body: JSON.stringify({ name, key }),
+  });
+}
+
+export async function updateApiKeyName(id: number, name: string) {
+  return fetchApi(`/api/keys/${id}`, {
+    method: "PUT",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function deleteApiKey(id: number) {
+  return fetchApi(`/api/keys/${id}`, { method: "DELETE" });
+}
+
+export async function regenerateApiKeySecret(id: number) {
+  return fetchApi(`/api/keys/regenerate/${id}`, { method: "POST" });
 }
 
 export async function regenerateApiKey() {

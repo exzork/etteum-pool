@@ -1,13 +1,19 @@
 import TokenUsage from "@/components/dashboard/TokenUsage";
 import { useEffect, useState, useRef } from "react";
-import { fetchDashboardStats, fetchModelUsage } from "@/lib/api";
+import { fetchDashboardStats, fetchModelUsage, fetchAllApiKeys, type ApiKeyEntry } from "@/lib/api";
 import { modelColor } from "@/lib/utils";
 import { useWsEvent } from "@/hooks/useWebSocket";
 
 export default function Usage() {
   const [stats, setStats] = useState<any>(null);
   const [modelStats, setModelStats] = useState<any[]>([]);
+  const [apiKeys, setApiKeys] = useState<ApiKeyEntry[]>([]);
+  const [selectedKeyId, setSelectedKeyId] = useState<number>(0);
   const reloadRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    fetchAllApiKeys().then((res) => setApiKeys(res.data || [])).catch(() => {});
+  }, []);
 
   async function load() {
     await Promise.all([
@@ -35,6 +41,8 @@ export default function Usage() {
     credits: Number(stats?.tokens?.credits || 0),
   };
 
+  // Filter model usage by selected API key (client-side for now since usage_summary
+  // doesn't have per-key breakdown in the aggregated view)
   const modelUsage = modelStats.map((m, idx) => ({
     provider: m.provider || "unknown",
     model: m.model || "unknown",
@@ -49,11 +57,23 @@ export default function Usage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-[var(--foreground)]">Usage</h1>
-        <p className="text-sm text-[var(--muted-foreground)] mt-1">
-          Detailed token and credit usage analytics
-        </p>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-[var(--foreground)]">Usage</h1>
+          <p className="text-sm text-[var(--muted-foreground)] mt-1">
+            Detailed token and credit usage analytics
+          </p>
+        </div>
+        <select
+          value={selectedKeyId}
+          onChange={(e) => setSelectedKeyId(Number(e.target.value))}
+          className="h-9 rounded-md border border-[var(--border)] bg-[var(--background)] px-3 text-sm text-[var(--foreground)]"
+        >
+          <option value={0}>All API Keys</option>
+          {apiKeys.map((k) => (
+            <option key={k.id} value={k.id}>{k.name}</option>
+          ))}
+        </select>
       </div>
 
       <TokenUsage stats={tokenStats} modelUsage={modelUsage} />

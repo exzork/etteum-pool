@@ -1,168 +1,212 @@
 import { useEffect, useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Copy, Eye, EyeOff, RefreshCw, Check, Save, ShieldCheck } from "lucide-react";
-import { fetchApiKey, regenerateApiKey, setApiKey, testApiKey } from "@/lib/api";
-import { useTimedMessage } from "@/hooks/useTimedMessage";
+import { Badge } from "@/components/ui/badge";
+import { Copy, Plus, Trash2, RefreshCw, Eye, EyeOff, Pencil } from "lucide-react";
+import { fetchAllApiKeys, createApiKey, deleteApiKey, regenerateApiKeySecret, updateApiKeyName, type ApiKeyEntry } from "@/lib/api";
 
 export default function ApiKey() {
-  const [apiKey, setApiKeyState] = useState(localStorage.getItem("api_key") || "REDACTED");
-  const [source, setSource] = useState("browser");
-  const [showKey, setShowKey] = useState(false);
-  const { message, setMessage: setTimedMessage, clearMessage } = useTimedMessage<string>(null, 3500);
-  const { message: copied, setMessage: setCopiedTimed } = useTimedMessage<boolean>(null, 2000);
-  const [error, setError] = useState<string | null>(null);
-  const [valid, setValid] = useState<boolean | null>(null);
+  const [keys, setKeys] = useState<ApiKeyEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [newName, setNewName] = useState("");
+  const [newKey, setNewKey] = useState("");
+  const [showKeys, setShowKeys] = useState<Record<number, boolean>>({});
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editName, setEditName] = useState("");
+  const [message, setMessage] = useState<string | null>(null);
 
-  function notify(text: string) {
-    setTimedMessage(text);
-    setError(null);
-  }
-
-  function fail(err: unknown) {
-    setError(err instanceof Error ? err.message : String(err));
-    clearMessage();
-  }
-
-  function saveToBrowser(key = apiKey) {
-    localStorage.setItem("api_key", key);
-    setApiKeyState(key);
-  }
-
-  async function loadKey() {
+  async function load() {
+    setLoading(true);
     try {
-      const res = await fetchApiKey() as { key: string; source: string };
-      setApiKeyState(res.key);
-      setSource(res.source);
-      saveToBrowser(res.key);
-      setValid(true);
-    } catch (err) {
-      fail(err);
+      const res = await fetchAllApiKeys();
+      setKeys(res.data || []);
+    } catch {
+      setKeys([]);
+    } finally {
+      setLoading(false);
     }
   }
 
-  useEffect(() => {
-    loadKey();
-  }, []);
+  useEffect(() => { load(); }, []);
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(apiKey);
-    setCopiedTimed(true);
-  };
+  function flash(msg: string) {
+    setMessage(msg);
+    setTimeout(() => setMessage(null), 3000);
+  }
 
-  async function handleSave() {
+  async function handleCreate() {
+    if (!newName.trim()) return;
     try {
-      const res = await setApiKey(apiKey) as { key: string; source: string };
-      saveToBrowser(res.key);
-      setSource(res.source);
-      setValid(true);
-      notify("API key saved to backend and browser. It can now be used for proxy requests.");
-    } catch (err) {
-      fail(err);
+      await createApiKey(newName.trim(), newKey.trim() || undefined);
+      setNewName("");
+      setNewKey("");
+      flash("API key created");
+      load();
+    } catch (e: any) {
+      flash(e.message || "Failed to create key");
     }
   }
 
-  async function handleRegenerate() {
-    if (!confirm("Regenerate API key? Existing generated key will stop working.")) return;
+  async function handleDelete(id: number) {
+    if (!confirm("Delete this API key? Any clients using it will lose access.")) return;
     try {
-      const res = await regenerateApiKey() as { key: string; source: string };
-      saveToBrowser(res.key);
-      setSource(res.source);
-      setValid(true);
-      notify("New API key generated, saved, and activated.");
-    } catch (err) {
-      fail(err);
+      await deleteApiKey(id);
+      flash("API key deleted");
+      load();
+    } catch (e: any) {
+      flash(e.message || "Failed to delete key");
     }
   }
 
-  async function handleTest() {
+  async function handleRegenerate(id: number) {
+    if (!confirm("Regenerate this key? The old key will stop working immediately.")) return;
     try {
-      const res = await testApiKey(apiKey) as { valid: boolean };
-      setValid(res.valid);
-      notify(res.valid ? "API key is valid." : "API key is invalid.");
-    } catch (err) {
-      fail(err);
+      await regenerateApiKeySecret(id);
+      flash("Key regenerated");
+      load();
+    } catch (e: any) {
+      flash(e.message || "Failed to regenerate key");
     }
+  }
+
+  async function handleRename(id: number) {
+    if (!editName.trim()) return;
+    try {
+      await updateApiKeyName(id, editName.trim());
+      setEditingId(null);
+      flash("Key renamed");
+      load();
+    } catch (e: any) {
+      flash(e.message || "Failed to rename key");
+    }
+  }
+
+  function maskKey(key: string) {
+    if (key.length <= 12) return "••••••••";
+    return key.slice(0, 8) + "••••••••" + key.slice(-4);
   }
 
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-[var(--foreground)]">API Key</h1>
+        <h1 className="text-2xl font-bold text-[var(--foreground)]">API Keys</h1>
         <p className="text-sm text-[var(--muted-foreground)] mt-1">
-          Generate and activate proxy API keys
+          Manage API keys for proxy access. Each key can be tracked independently in request logs.
         </p>
       </div>
 
-      {(message || error) && (
-        <div className={`rounded-md p-3 text-sm ${message ? "bg-[var(--success)]/10 text-[var(--success)]" : "bg-[var(--error)]/10 text-[var(--error)]"}`}>
-          {message || error}
+      {message && (
+        <div className="rounded-md bg-[var(--primary)]/10 p-3 text-sm text-[var(--primary)]">
+          {message}
         </div>
       )}
 
-      <Card className="border-[var(--border)] max-w-3xl">
+      {/* Create new key */}
+      <Card className="border-[var(--border)]">
         <CardHeader>
-          <CardTitle className="text-base flex items-center gap-2">
-            <ShieldCheck className="w-4 h-4" /> Active API Key
-          </CardTitle>
-          <CardDescription>
-            Source: <span className="font-mono">{source}</span>. The env fallback key also remains accepted.
-          </CardDescription>
+          <CardTitle className="text-base">Create New Key</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex gap-2">
-            <div className="relative flex-1">
-              <Input
-                type={showKey ? "text" : "password"}
-                value={apiKey}
-                onChange={(e) => {
-                  setApiKeyState(e.target.value);
-                  setValid(null);
-                }}
-                className="pr-10 font-mono text-sm"
-              />
-              <button
-                onClick={() => setShowKey(!showKey)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
-              >
-                {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-              </button>
-            </div>
-            <Button variant="outline" size="icon" onClick={handleCopy} title="Copy">
-              {copied ? <Check className="w-4 h-4 text-[var(--success)]" /> : <Copy className="w-4 h-4" />}
+        <CardContent>
+          <div className="flex flex-col gap-3 sm:flex-row">
+            <Input
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              placeholder="Key name (e.g. hermes, codex, team-a)"
+              className="flex-1"
+            />
+            <Input
+              value={newKey}
+              onChange={(e) => setNewKey(e.target.value)}
+              placeholder="Custom key (optional, auto-generated if empty)"
+              className="flex-1 font-mono text-xs"
+            />
+            <Button onClick={handleCreate} disabled={!newName.trim()}>
+              <Plus className="w-4 h-4 mr-2" /> Create
             </Button>
           </div>
+        </CardContent>
+      </Card>
 
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div className="text-sm">
-              Status: {valid === true && <span className="text-[var(--success)]">valid</span>}
-              {valid === false && <span className="text-[var(--error)]">invalid</span>}
-              {valid === null && <span className="text-[var(--muted-foreground)]">not tested</span>}
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <Button variant="outline" size="sm" onClick={loadKey}>Load Active</Button>
-              <Button variant="outline" size="sm" onClick={handleTest}>Test</Button>
-              <Button variant="outline" size="sm" onClick={handleRegenerate}>
-                <RefreshCw className="w-4 h-4 mr-2" /> Generate
-              </Button>
-              <Button size="sm" onClick={handleSave}>
-                <Save className="w-4 h-4 mr-2" /> Save & Activate
-              </Button>
-            </div>
-          </div>
-
-          <div className="rounded-lg bg-[var(--secondary)] p-4 mt-4">
-            <h4 className="text-sm font-medium text-[var(--foreground)] mb-2">Usage Example</h4>
-            <pre className="text-xs text-[var(--muted-foreground)] overflow-x-auto">
-{`curl http://localhost:1930/v1/chat/completions \\
-  -H "Authorization: Bearer ${showKey ? apiKey : "sk-pool-***"}" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "claude-sonnet-4",
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'`}
-            </pre>
+      {/* Key list */}
+      <Card className="border-[var(--border)]">
+        <CardContent className="p-0">
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-[var(--border)]">
+                  <th className="text-left text-xs font-medium text-[var(--muted-foreground)] uppercase tracking-wide p-4">Name</th>
+                  <th className="text-left text-xs font-medium text-[var(--muted-foreground)] uppercase tracking-wide p-4">Key</th>
+                  <th className="text-left text-xs font-medium text-[var(--muted-foreground)] uppercase tracking-wide p-4">Source</th>
+                  <th className="text-left text-xs font-medium text-[var(--muted-foreground)] uppercase tracking-wide p-4">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {keys.map((k) => (
+                  <tr key={k.id} className="border-b border-[var(--border)] last:border-0">
+                    <td className="p-4">
+                      {editingId === k.id ? (
+                        <div className="flex items-center gap-2">
+                          <Input
+                            value={editName}
+                            onChange={(e) => setEditName(e.target.value)}
+                            className="h-7 text-sm w-40"
+                            onKeyDown={(e) => e.key === "Enter" && handleRename(k.id)}
+                          />
+                          <Button size="sm" variant="outline" onClick={() => handleRename(k.id)}>Save</Button>
+                          <Button size="sm" variant="outline" onClick={() => setEditingId(null)}>Cancel</Button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium text-[var(--foreground)]">{k.name}</span>
+                          {k.id !== 0 && (
+                            <button onClick={() => { setEditingId(k.id); setEditName(k.name); }} className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]">
+                              <Pencil className="w-3 h-3" />
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </td>
+                    <td className="p-4">
+                      <div className="flex items-center gap-2">
+                        <code className="text-xs text-[var(--muted-foreground)] font-mono">
+                          {showKeys[k.id] ? k.key : maskKey(k.key)}
+                        </code>
+                        <button onClick={() => setShowKeys((s) => ({ ...s, [k.id]: !s[k.id] }))} className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]">
+                          {showKeys[k.id] ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                        </button>
+                        <button onClick={() => { navigator.clipboard.writeText(k.key); flash("Copied!"); }} className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]">
+                          <Copy className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </td>
+                    <td className="p-4">
+                      <Badge variant={k.source === "env" ? "warning" : "success"} className="text-[10px]">
+                        {k.source}
+                      </Badge>
+                    </td>
+                    <td className="p-4">
+                      {k.id !== 0 && (
+                        <div className="flex items-center gap-2">
+                          <Button size="sm" variant="outline" onClick={() => handleRegenerate(k.id)}>
+                            <RefreshCw className="w-3.5 h-3.5" />
+                          </Button>
+                          <Button size="sm" variant="outline" onClick={() => handleDelete(k.id)} className="text-[var(--error)] hover:text-[var(--error)]">
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </Button>
+                        </div>
+                      )}
+                      {k.id === 0 && (
+                        <span className="text-xs text-[var(--muted-foreground)]">Set via DASHBOARD_PASSWORD env</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+                {!loading && keys.length === 0 && (
+                  <tr><td colSpan={4} className="p-8 text-center text-sm text-[var(--muted-foreground)]">No API keys</td></tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </CardContent>
       </Card>

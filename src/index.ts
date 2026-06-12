@@ -7,7 +7,7 @@ import { apiRouter } from "./api/index";
 import { authRouter } from "./auth/index";
 import { proxyRouter } from "./proxy/index";
 import { websocketHandler, getClientCount } from "./ws/index";
-import { isValidApiKey } from "./api/keys";
+import { isValidApiKey, resolveApiKey, ensureApiKeysTable, type ResolvedApiKey } from "./api/keys";
 import { autoWarmupScheduler } from "./auth/warmup-scheduler";
 import { db } from "./db/index";
 import { filterRules } from "./db/schema";
@@ -19,6 +19,9 @@ import { refreshByokModels } from "./proxy/providers/registry";
 
 // Run database migrations on startup
 await runMigrations();
+
+// Ensure api_keys table exists (idempotent)
+ensureApiKeysTable();
 
 // Seed filter rules from PUDIDIL_FILTERS if table is empty (first boot only)
 try {
@@ -83,20 +86,23 @@ app.use("/v1/*", async (c, next) => {
     );
   }
 
-  if (!(await isValidApiKey(token))) {
+  const resolved = await resolveApiKey(token);
+  if (!resolved) {
     return c.json(
       { error: { message: "Invalid API key", type: "auth_error" } },
       401
     );
   }
 
+  // Store resolved key info for downstream use
+  c.set("apiKey" as any, resolved);
   await next();
 });
 
 // API Key authentication for management API
 app.use("/api/*", async (c, next) => {
-  // Allow health check, info, and key validation without auth
-  if (c.req.path === "/api/health" || c.req.path === "/api/info" || c.req.path === "/api/keys/test") {
+  // Allow health check, info, login, and key validation without auth
+  if (c.req.path === "/api/health" || c.req.path === "/api/info" || c.req.path === "/api/keys/test" || c.req.path === "/api/login") {
     await next();
     return;
   }
@@ -139,6 +145,24 @@ app.get("/api/info", (c) => {
     },
     wsClients: getClientCount(),
   });
+});
+
+// Password-based login for dashboard (no auth required)
+app.post("/api/login", async (c) => {
+  const body = await c.req.json<{ password: string }>().catch(() => ({ password: "" }));
+  const password = body.password || "";
+
+  if (!password) {
+    return c.json({ error: "Password is required" }, 400);
+  }
+
+  const dashboardPassword = process.env.DASHBOARD_PASSWORD || config.apiKey;
+  if (password !== dashboardPassword) {
+    return c.json({ error: "Invalid password" }, 401);
+  }
+
+  // Return the env API key as a session token for subsequent API calls
+  return c.json({ success: true, token: config.apiKey });
 });
 
 // Serve dashboard static files (SPA fallback)

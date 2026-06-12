@@ -3,34 +3,33 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Eye, EyeOff, Lock } from "lucide-react";
-import { validateApiKey, API_BASE } from "@/lib/api";
+import { loginWithPassword, API_BASE } from "@/lib/api";
 
 interface LoginProps {
   onLogin: () => void;
 }
 
 export default function Login({ onLogin }: LoginProps) {
-  const [key, setKey] = useState("");
-  const [showKey, setShowKey] = useState(false);
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!key.trim()) {
-      setError("Please enter an API key");
+    if (!password.trim()) {
+      setError("Please enter a password");
       return;
     }
 
     setLoading(true);
     setError(null);
 
-    const valid = await validateApiKey(key.trim());
-    if (valid) {
-      localStorage.setItem("api_key", key.trim());
+    const result = await loginWithPassword(password.trim());
+    if (result.success) {
       onLogin();
     } else {
-      setError("Invalid API key");
+      setError(result.error || "Invalid password");
     }
     setLoading(false);
   }
@@ -44,26 +43,26 @@ export default function Login({ onLogin }: LoginProps) {
           </div>
           <CardTitle className="text-xl">Etteum</CardTitle>
           <p className="text-sm text-[var(--muted-foreground)] mt-1">
-            Enter your API key to access the dashboard
+            Enter your password to access the dashboard
           </p>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="relative">
               <Input
-                type={showKey ? "text" : "password"}
-                value={key}
-                onChange={(e) => { setKey(e.target.value); setError(null); }}
-                placeholder="sk-pool-..."
-                className="pr-10 font-mono text-sm"
+                type={showPassword ? "text" : "password"}
+                value={password}
+                onChange={(e) => { setPassword(e.target.value); setError(null); }}
+                placeholder="Password"
+                className="pr-10"
                 autoFocus
               />
               <button
                 type="button"
-                onClick={() => setShowKey(!showKey)}
+                onClick={() => setShowPassword(!showPassword)}
                 className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
               >
-                {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
               </button>
             </div>
 
@@ -74,7 +73,7 @@ export default function Login({ onLogin }: LoginProps) {
             )}
 
             <Button type="submit" className="w-full" disabled={loading}>
-              {loading ? "Verifying..." : "Login"}
+              {loading ? "Logging in..." : "Login"}
             </Button>
           </form>
         </CardContent>

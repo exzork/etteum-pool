@@ -213,6 +213,98 @@ async def _verify_email_via_gmail(page: Any, email: str, password: str) -> dict[
     return await _gmail_get_gitlab_code_or_link(page, email, password, mode="link")
 
 
+async def _solve_arkose_if_present(page: Any) -> bool:
+    """
+    Detect and solve Arkose Labs/FunCaptcha challenge using Capsolver.
+    Returns True if solved (or no challenge present), False if failed.
+    """
+    import re as _re
+
+    # Check if Arkose iframe is present
+    content = await page.content()
+    frames = page.frames
+    arkose_frames = [f for f in frames if 'arkoselabs.com' in f.url or 'funcaptcha' in f.url]
+
+    # Also check for arkose in page HTML
+    has_arkose = bool(arkose_frames) or 'arkoselabs' in content.lower() or 'funcaptcha' in content.lower()
+
+    if not has_arkose:
+        return True  # No challenge present
+
+    _log("Arkose Labs challenge detected, solving with Capsolver...")
+
+    # Extract the public key from the page
+    public_key = None
+    keys = _re.findall(r'[A-F0-9]{8}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{12}', content)
+    if keys:
+        public_key = keys[0]
+    else:
+        for f in arkose_frames:
+            key_match = _re.search(r'[A-F0-9]{8}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{12}', f.url)
+            if key_match:
+                public_key = key_match.group(0)
+                break
+
+    if not public_key:
+        # GitLab's known identity verification Arkose key
+        public_key = "2CB16598-CB82-4CF7-B332-5990DB66F3AB"
+
+    _log(f"Arkose public key: {public_key}")
+
+    try:
+        import capsolver
+        capsolver.api_key = os.getenv("CAPTCHA_API_KEY", "")
+
+        solution = capsolver.solve({
+            "type": "FunCaptchaTaskProxyLess",
+            "websiteURL": page.url,
+            "websitePublicKey": public_key,
+        })
+
+        token = solution.get("token", "")
+        if not token:
+            _log(f"Capsolver returned no token: {solution}")
+            return False
+
+        _log(f"Arkose token received ({len(token)} chars)")
+
+        # Inject the token into the page
+        await page.evaluate("""(token) => {
+            // Try hidden input
+            const tokenInput = document.querySelector('input[name="arkose_labs_token"]') ||
+                               document.querySelector('input[name="verification_token"]') ||
+                               document.querySelector('#arkose-token') ||
+                               document.querySelector('[name*="arkose"]');
+            if (tokenInput) {
+                tokenInput.value = token;
+                tokenInput.dispatchEvent(new Event('input', {bubbles: true}));
+                tokenInput.dispatchEvent(new Event('change', {bubbles: true}));
+                return 'input';
+            }
+            // Try global callback
+            if (window.arkoseCallback) {
+                window.arkoseCallback({token: token});
+                return 'callback';
+            }
+            // Try enforcement object
+            if (window.myEnforcement && window.myEnforcement.setConfig) {
+                window.myEnforcement.setConfig({data: {token: token}});
+                return 'enforcement';
+            }
+            // Dispatch event for any listeners
+            document.dispatchEvent(new CustomEvent('arkose-complete', {detail: {token: token}}));
+            return 'event';
+        }""", token)
+
+        await asyncio.sleep(3)
+        _log("Arkose token injected")
+        return True
+
+    except Exception as e:
+        _log(f"Capsolver solve failed: {e}")
+        return False
+
+
 async def _verify_identity_code(page: Any, email: str, password: str) -> dict[str, Any]:
     """
     Handle GitLab identity verification: get code from Gmail and enter it.
@@ -239,10 +331,15 @@ async def _verify_identity_code(page: Any, email: str, password: str) -> dict[st
     await asyncio.sleep(3)
     await _wait_for_cloudflare(page, timeout_s=20)
 
+    # Check for Arkose/FunCaptcha challenge and solve it
+    await _solve_arkose_if_present(page)
+
     # Enter the code
     try:
         code_input = await page.wait_for_selector(
-            'input[name*="verification_code"], input[name*="code"], input[type="text"][maxlength="6"], input[data-testid*="code"]',
+            'input[name*="verification_code"], input[name*="code"], '
+            'input[type="text"][maxlength="6"], input[data-testid*="code"], '
+            'input[id*="code"], input[placeholder*="code" i]',
             timeout=15000
         )
         await code_input.click()

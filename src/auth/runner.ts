@@ -378,6 +378,7 @@ async function loginGitLabDuo(account: Account, password: string, headless: bool
           BATCHER_PROXY_URL: proxyUrlForAuth || config.proxyUrl || "",
           HTTP_PROXY: proxyUrlForAuth || config.proxyUrl || "",
           HTTPS_PROXY: proxyUrlForAuth || config.proxyUrl || "",
+          CAPTCHA_API_KEY: config.captchaApiKey || "",
         },
         cwd: config.authScriptCwd,
       }

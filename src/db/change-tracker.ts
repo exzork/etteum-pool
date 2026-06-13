@@ -140,6 +140,16 @@ export function stopChangePolling() {
   }
 }
 
+/**
+ * Clear all pending changelog entries.
+ * Call after applying remote state to prevent echo-back.
+ */
+export function clearChangelog() {
+  try {
+    client.exec(`DELETE FROM _sync_changelog`);
+  } catch {}
+}
+
 function getMaxChangelogId(): number {
   try {
     const row = client.prepare(`SELECT MAX(id) as max_id FROM _sync_changelog`).get() as { max_id: number | null } | null;

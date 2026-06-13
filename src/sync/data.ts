@@ -8,6 +8,7 @@ import { accounts, apiKeys, settings, filterRules, modelMappings, proxyPool, req
 import { eq, sql } from "drizzle-orm";
 import type { SyncDelta, SyncFullData, SyncTable } from "./types";
 import { setSuppressEmit } from "./state";
+import { clearChangelog } from "../db/change-tracker";
 
 /**
  * Extract full sync-able state from local DB.
@@ -182,6 +183,7 @@ export async function applyFullState(data: SyncFullData, remoteNodeId: string): 
   }
 
   console.log(`[Sync] Applied ${applied} rows from node ${remoteNodeId}`);
+  clearChangelog(); // Prevent echo-back of remote state
   setSuppressEmit(false);
   return applied;
 }
@@ -196,15 +198,18 @@ export async function applyDelta(delta: SyncDelta): Promise<boolean> {
 
     if (operation === "delete") {
       const result = applyDelete(table, row);
+      clearChangelog();
       setSuppressEmit(false);
       return result;
     }
 
     // Upsert
     const result = applyUpsert(table, row);
+    clearChangelog();
     setSuppressEmit(false);
     return result;
   } catch (e) {
+    clearChangelog();
     setSuppressEmit(false);
     console.error(`[Sync] Failed to apply delta:`, e);
     return false;

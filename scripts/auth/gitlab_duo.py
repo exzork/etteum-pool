@@ -184,6 +184,141 @@ async def _check_captcha(page: Any) -> bool:
     return False
 
 
+async def _verify_email_via_gmail(page: Any, email: str, password: str) -> dict[str, Any]:
+    """
+    Log into Gmail and click the GitLab email confirmation link.
+    Reuses the same browser page.
+    Returns: {"success": True} or {"success": False, "error": "..."}
+    """
+    _log("Verifying email via Gmail...")
+
+    # Navigate to Google sign-in
+    await page.goto(
+        "https://accounts.google.com/signin/v2/identifier?service=mail&flowName=GlifWebSignIn",
+        wait_until="domcontentloaded",
+        timeout=NAV_TIMEOUT,
+    )
+    await asyncio.sleep(3)
+
+    # Wait for CF if present
+    await _wait_for_cloudflare(page, timeout_s=15)
+
+    # Fill email
+    try:
+        email_input = await page.wait_for_selector('#identifierId, input[type="email"]', timeout=15000)
+        await email_input.click()
+        await asyncio.sleep(0.3)
+        await page.keyboard.type(email, delay=random.randint(30, 60))
+        await asyncio.sleep(1)
+
+        # Click Next
+        next_btn = await page.query_selector('#identifierNext button, #identifierNext')
+        if next_btn:
+            await next_btn.click()
+        await asyncio.sleep(4)
+    except Exception as e:
+        return {"success": False, "error": f"Gmail email step failed: {e}"}
+
+    # Fill password
+    try:
+        pass_input = await page.wait_for_selector('input[type="password"], input[name="Passwd"]', timeout=15000)
+        await pass_input.click()
+        await asyncio.sleep(0.3)
+        await page.keyboard.type(password, delay=random.randint(30, 60))
+        await asyncio.sleep(1)
+
+        next_btn2 = await page.query_selector('#passwordNext button, #passwordNext')
+        if next_btn2:
+            await next_btn2.click()
+        await asyncio.sleep(8)
+    except Exception as e:
+        return {"success": False, "error": f"Gmail password step failed: {e}"}
+
+    # Check if we're in the inbox
+    current_url = page.url
+    if "mail.google.com" not in current_url and "inbox" not in current_url:
+        _log(f"Gmail login may have failed. URL: {current_url}")
+        # Could be 2FA or other challenge - take screenshot for debugging
+        return {"success": False, "error": f"Gmail login did not reach inbox. URL: {current_url}"}
+
+    _log("Gmail inbox reached, searching for GitLab confirmation email...")
+    await asyncio.sleep(3)
+
+    # Navigate directly to Gmail search for GitLab confirmation emails
+    await page.goto(
+        "https://mail.google.com/mail/u/0/#search/from%3Agitlab+confirm+your+email",
+        timeout=NAV_TIMEOUT,
+    )
+    await asyncio.sleep(5)
+
+    # Find the confirmation email and extract the link
+    # Strategy: scan page HTML for the confirmation token URL directly,
+    # or click the first email in search results
+    import re as _re
+
+    for attempt in range(5):
+        if attempt > 0:
+            _log(f"Retrying email search (attempt {attempt + 1})...")
+            await asyncio.sleep(8)
+            await page.reload()
+            await asyncio.sleep(5)
+
+        # First try: click any visible email row (Gmail uses various structures)
+        try:
+            # Click the first email in the list using generic table row
+            clicked = False
+            for selector in ['table.F tr', 'div[role="main"] tr', 'tbody tr']:
+                rows = await page.query_selector_all(selector)
+                if rows:
+                    await rows[0].click()
+                    await asyncio.sleep(4)
+                    clicked = True
+                    _log("Clicked first email row")
+                    break
+
+            if not clicked:
+                continue
+
+            # Now we should be inside the email - look for confirmation link
+            content = await page.content()
+            # GitLab confirmation links look like:
+            # https://gitlab.com/users/confirmation?confirmation_token=XXXXX
+            links = _re.findall(
+                r'https://gitlab\.com/users/confirmation\?confirmation_token=[A-Za-z0-9_\-]+',
+                content
+            )
+            if links:
+                confirm_url = links[0]
+                _log(f"Found confirmation link: {confirm_url[:80]}...")
+                await page.goto(confirm_url, timeout=NAV_TIMEOUT)
+                await asyncio.sleep(3)
+                await _wait_for_cloudflare(page, timeout_s=15)
+                _log("Email confirmed!")
+                return {"success": True}
+
+            # Also try finding a clickable "Confirm your account" button/link
+            confirm_btn = await page.query_selector('a:has-text("Confirm your account"), a:has-text("Confirm your email")')
+            if confirm_btn:
+                href = await confirm_btn.get_attribute("href")
+                if href and "confirmation" in href:
+                    _log(f"Found confirm button with href: {href[:80]}...")
+                    await page.goto(href, timeout=NAV_TIMEOUT)
+                    await asyncio.sleep(3)
+                    await _wait_for_cloudflare(page, timeout_s=15)
+                    _log("Email confirmed!")
+                    return {"success": True}
+
+            # Go back to search results for next attempt
+            await page.go_back()
+            await asyncio.sleep(2)
+
+        except Exception as e:
+            _log(f"Attempt {attempt + 1} error: {e}")
+            continue
+
+    return {"success": False, "error": "Could not find GitLab confirmation link in emails after retries"}
+
+
 async def _check_rate_limit(page: Any) -> bool:
     """Check if we're being rate limited."""
     try:
@@ -797,15 +932,18 @@ async def process_account(email: str, password: str, headless: bool = True) -> d
                     # Non-retryable signup error but try login anyway
                     _log(f"Signup issue: {signup_result['error']} - attempting login anyway")
 
-            # If verification is needed, we can't proceed with PAT creation
+            # If verification is needed, try to verify via Gmail
             if signup_result.get("needs_verification"):
-                _log("Email verification required - cannot create PAT automatically")
-                return {
-                    "success": False,
-                    "error": "Email verification required - confirm email and re-run with login only",
-                    "needs_verification": True,
-                    "username": signup_result.get("username", ""),
-                }
+                _log("Email verification required - attempting Gmail verification...")
+                verify_result = await _verify_email_via_gmail(page, email, password)
+                if not verify_result["success"]:
+                    return {
+                        "success": False,
+                        "error": f"Email verification failed: {verify_result['error']}",
+                        "needs_verification": True,
+                        "username": signup_result.get("username", ""),
+                    }
+                _log("Email verified! Proceeding to login...")
 
             # Step 2: Login
             _log("Step 2: Login")

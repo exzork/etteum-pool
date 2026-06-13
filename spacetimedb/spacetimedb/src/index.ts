@@ -649,6 +649,13 @@ export const upsertUsageSummary = spacetimedb.reducer(
   }
 );
 
+export const deleteUsageSummary = spacetimedb.reducer(
+  { id: t.u64() },
+  (ctx, { id }) => {
+    ctx.db.usageSummary.id.delete(id);
+  }
+);
+
 // ─── Filter Rules Reducers ──────────────────────────────────────────────────
 
 export const upsertFilterRule = spacetimedb.reducer(

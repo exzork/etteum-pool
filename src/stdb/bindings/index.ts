@@ -42,6 +42,7 @@ import DeleteImageStudioChatReducer from "./delete_image_studio_chat_reducer";
 import DeleteModelMappingReducer from "./delete_model_mapping_reducer";
 import DeleteProxyReducer from "./delete_proxy_reducer";
 import DeleteSettingReducer from "./delete_setting_reducer";
+import DeleteUsageSummaryReducer from "./delete_usage_summary_reducer";
 import DeleteVccCardReducer from "./delete_vcc_card_reducer";
 import InsertImageStudioResultReducer from "./insert_image_studio_result_reducer";
 import InsertRequestLogReducer from "./insert_request_log_reducer";
@@ -277,6 +278,7 @@ const reducersSchema = __reducers(
   __reducerSchema("delete_model_mapping", DeleteModelMappingReducer),
   __reducerSchema("delete_proxy", DeleteProxyReducer),
   __reducerSchema("delete_setting", DeleteSettingReducer),
+  __reducerSchema("delete_usage_summary", DeleteUsageSummaryReducer),
   __reducerSchema("delete_vcc_card", DeleteVccCardReducer),
   __reducerSchema("insert_image_studio_result", InsertImageStudioResultReducer),
   __reducerSchema("insert_request_log", InsertRequestLogReducer),

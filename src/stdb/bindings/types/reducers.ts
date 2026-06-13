@@ -14,6 +14,7 @@ import DeleteImageStudioChatReducer from "../delete_image_studio_chat_reducer";
 import DeleteModelMappingReducer from "../delete_model_mapping_reducer";
 import DeleteProxyReducer from "../delete_proxy_reducer";
 import DeleteSettingReducer from "../delete_setting_reducer";
+import DeleteUsageSummaryReducer from "../delete_usage_summary_reducer";
 import DeleteVccCardReducer from "../delete_vcc_card_reducer";
 import InsertImageStudioResultReducer from "../insert_image_studio_result_reducer";
 import InsertRequestLogReducer from "../insert_request_log_reducer";
@@ -42,6 +43,7 @@ export type DeleteImageStudioChatParams = __Infer<typeof DeleteImageStudioChatRe
 export type DeleteModelMappingParams = __Infer<typeof DeleteModelMappingReducer>;
 export type DeleteProxyParams = __Infer<typeof DeleteProxyReducer>;
 export type DeleteSettingParams = __Infer<typeof DeleteSettingReducer>;
+export type DeleteUsageSummaryParams = __Infer<typeof DeleteUsageSummaryReducer>;
 export type DeleteVccCardParams = __Infer<typeof DeleteVccCardReducer>;
 export type InsertImageStudioResultParams = __Infer<typeof InsertImageStudioResultReducer>;
 export type InsertRequestLogParams = __Infer<typeof InsertRequestLogReducer>;

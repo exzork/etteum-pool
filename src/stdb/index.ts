@@ -31,6 +31,26 @@ let connection: DbConnection | null = null;
 let connected = false;
 let subscriptionReady = false;
 let connectPromise: Promise<void> | null = null;
+let initialConnectSettled = false; // first connect resolved/rejected (controls startup vs. reconnect)
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let reconnectAttempts = 0;
+
+// Reconnect after the link drops (e.g. SpacetimeDB server restart). The SDK does
+// NOT auto-reconnect, so we rebuild the connection ourselves with capped backoff.
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  const delay = Math.min(30_000, 1_000 * 2 ** Math.min(reconnectAttempts, 5)); // 1s..30s
+  reconnectAttempts++;
+  console.warn(`[STDB] Scheduling reconnect in ${delay}ms (attempt ${reconnectAttempts})`);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connectPromise = null; // allow initStdb() to rebuild
+    initStdb().catch((err) => {
+      console.error("[STDB] Reconnect failed:", err?.message || err);
+      scheduleReconnect();
+    });
+  }, delay);
+}
 
 // Event emitter for table changes (used by WebSocket broadcast to dashboard)
 type ChangeListener = (table: string, event: "insert" | "update" | "delete", row: any) => void;
@@ -81,6 +101,8 @@ export async function initStdb(): Promise<void> {
         sub.onApplied(() => {
           console.log("[STDB] Subscription applied — all tables synced");
           subscriptionReady = true;
+          reconnectAttempts = 0; // healthy connection, reset backoff
+          initialConnectSettled = true;
           resolve();
         });
         sub.onError((_ctx: ErrorContext, err: Error) => {
@@ -95,11 +117,22 @@ export async function initStdb(): Promise<void> {
         console.warn("[STDB] Disconnected:", err?.message || "unknown");
         connected = false;
         subscriptionReady = false;
-        // Auto-reconnect is handled by the SDK
+        connection = null;
+        // The SDK does not auto-reconnect — drive it ourselves.
+        scheduleReconnect();
       })
       .onConnectError((_ctx: any, err: Error) => {
         console.error("[STDB] Connection error:", err.message);
-        reject(err);
+        connected = false;
+        subscriptionReady = false;
+        connection = null;
+        if (!initialConnectSettled) {
+          // Fail fast on first boot so the problem is visible.
+          initialConnectSettled = true;
+          reject(err);
+        } else {
+          scheduleReconnect();
+        }
       })
       .build();
   });
@@ -311,6 +344,8 @@ export const call = {
     creditsUsed: number;
     totalDurationMs: bigint;
   }) => getConn().reducers.upsertUsageSummary(args),
+
+  deleteUsageSummary: (args: { id: bigint }) => getConn().reducers.deleteUsageSummary(args),
 
   // Filter Rules
   upsertFilterRule: (args: {

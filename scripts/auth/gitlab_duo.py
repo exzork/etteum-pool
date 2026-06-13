@@ -275,64 +275,75 @@ async def _gmail_get_gitlab_code_or_link(page: Any, email: str, password: str, m
     """
     _log("Verifying email via Gmail...")
 
-    # Navigate to Google sign-in
+    # Navigate to Gmail directly - if already logged in via OAuth, it'll go to inbox
     await page.goto(
-        "https://accounts.google.com/signin/v2/identifier?service=mail&flowName=GlifWebSignIn",
+        "https://mail.google.com/mail/u/0/#inbox",
         wait_until="domcontentloaded",
         timeout=NAV_TIMEOUT,
     )
-    await asyncio.sleep(3)
+    await asyncio.sleep(5)
 
-    # Wait for CF if present
-    await _wait_for_cloudflare(page, timeout_s=15)
+    # Check if we're already in Gmail (logged in from OAuth session)
+    current_url = page.url
+    if "mail.google.com" in current_url:
+        _log("Already logged into Gmail (from OAuth session)")
+    else:
+        # Need to login to Google
+        # Wait for CF if present
+        await _wait_for_cloudflare(page, timeout_s=15)
 
-    # Fill email
-    try:
-        email_input = await page.wait_for_selector('#identifierId, input[type="email"]', timeout=15000)
-        await email_input.click()
-        await asyncio.sleep(0.3)
-        await page.keyboard.type(email, delay=random.randint(30, 60))
-        await asyncio.sleep(1)
+        # Fill email
+        try:
+            email_input = await page.wait_for_selector('#identifierId, input[type="email"]', timeout=10000)
+            await email_input.click()
+            await asyncio.sleep(0.3)
+            await page.keyboard.type(email, delay=random.randint(30, 60))
+            await asyncio.sleep(1)
 
-        # Click Next
-        next_btn = await page.query_selector('#identifierNext button, #identifierNext')
-        if next_btn:
-            await next_btn.click()
-        await asyncio.sleep(4)
-    except Exception as e:
-        return {"success": False, "error": f"Gmail email step failed: {e}"}
+            # Click Next
+            next_btn = await page.query_selector('#identifierNext button, #identifierNext')
+            if next_btn:
+                await next_btn.click()
+            await asyncio.sleep(4)
+        except Exception as e:
+            # Check if we ended up in Gmail anyway
+            if "mail.google.com" in page.url:
+                _log("Redirected to Gmail during login")
+            else:
+                return {"success": False, "error": f"Gmail email step failed: {e}"}
 
-    # Fill password
-    try:
-        # Wait for visible password input (Gmail has hidden ones too)
-        pass_input = await page.wait_for_selector('input[type="password"][name="Passwd"], input[type="password"]:not([aria-hidden="true"]):not([tabindex="-1"])', timeout=15000)
-        if not await pass_input.is_visible():
-            # Fallback: find the visible one manually
-            all_pass = await page.query_selector_all('input[type="password"]')
-            pass_input = None
-            for p in all_pass:
-                if await p.is_visible():
-                    pass_input = p
-                    break
-        if not pass_input:
-            return {"success": False, "error": "Gmail: no visible password field found"}
-        await pass_input.click()
-        await asyncio.sleep(0.3)
-        await page.keyboard.type(password, delay=random.randint(30, 60))
-        await asyncio.sleep(1)
+    # Fill password (only if not already in Gmail)
+    if "mail.google.com" not in page.url:
+        try:
+            # Wait for visible password input (Gmail has hidden ones too)
+            pass_input = await page.wait_for_selector('input[type="password"][name="Passwd"], input[type="password"]:not([aria-hidden="true"]):not([tabindex="-1"])', timeout=15000)
+            if not await pass_input.is_visible():
+                # Fallback: find the visible one manually
+                all_pass = await page.query_selector_all('input[type="password"]')
+                pass_input = None
+                for p in all_pass:
+                    if await p.is_visible():
+                        pass_input = p
+                        break
+            if not pass_input:
+                return {"success": False, "error": "Gmail: no visible password field found"}
+            await pass_input.click()
+            await asyncio.sleep(0.3)
+            await page.keyboard.type(password, delay=random.randint(30, 60))
+            await asyncio.sleep(1)
 
-        next_btn2 = await page.query_selector('#passwordNext button, #passwordNext')
-        if next_btn2:
-            await next_btn2.click()
-        await asyncio.sleep(8)
-    except Exception as e:
-        return {"success": False, "error": f"Gmail password step failed: {e}"}
+            next_btn2 = await page.query_selector('#passwordNext button, #passwordNext')
+            if next_btn2:
+                await next_btn2.click()
+            await asyncio.sleep(8)
+        except Exception as e:
+            if "mail.google.com" not in page.url:
+                return {"success": False, "error": f"Gmail password step failed: {e}"}
 
     # Check if we're in the inbox
     current_url = page.url
     if "mail.google.com" not in current_url and "inbox" not in current_url:
         _log(f"Gmail login may have failed. URL: {current_url}")
-        # Could be 2FA or other challenge - take screenshot for debugging
         return {"success": False, "error": f"Gmail login did not reach inbox. URL: {current_url}"}
 
     _log("Gmail inbox reached, searching for GitLab confirmation email...")
@@ -608,6 +619,13 @@ async def _signup(page: Any, email: str, password: str) -> dict[str, Any]:
 
 async def _check_oauth_result(page: Any) -> dict[str, Any]:
     """Check the result after Google OAuth redirect back to GitLab."""
+    # Wait for redirect from Google back to GitLab (up to 15s)
+    for _ in range(15):
+        current_url = page.url
+        if "gitlab.com" in current_url:
+            break
+        await asyncio.sleep(1)
+
     current_url = page.url
     content = await page.content()
     content_lower = content.lower()

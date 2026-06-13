@@ -89,11 +89,13 @@ export default function UsageChart({ data = defaultData, colorsByModel = {} }: U
           {models.map((model) => (
             <Area
               key={model}
-              type="monotone"
+              type="natural"
               dataKey={model}
               stroke={colors[model]}
               fill={`url(#gradient-${model})`}
               strokeWidth={2}
+              dot={false}
+              activeDot={{ r: 3 }}
             />
           ))}
         </AreaChart>

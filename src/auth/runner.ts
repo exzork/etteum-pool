@@ -337,6 +337,116 @@ async function getKiroProUpgradeEnv(accountId: number): Promise<Record<string, s
 }
 
 /**
+ * GitLab Duo login: runs gitlab_duo.py to signup/login and create a PAT.
+ * Output format: {"success": true, "pat": "glpat-..."} or {"success": false, "error": "..."}
+ */
+async function loginGitLabDuo(account: Account, password: string, headless: boolean): Promise<LoginResult> {
+  const provider = "gitlab-duo";
+  const scriptPath = `${config.authScriptCwd}/gitlab_duo.py`;
+
+  const startLog = addAuthLog({
+    type: "login_progress",
+    accountId: account.id,
+    email: account.email,
+    provider,
+    step: "starting",
+    message: `Starting GitLab Duo login for ${account.email}...`,
+  });
+  broadcast({
+    type: "login_progress",
+    data: { logId: startLog.id, id: account.id, email: account.email, provider, step: "starting", message: startLog.message },
+  });
+
+  try {
+    const proc = Bun.spawn(
+      [
+        config.pythonPath,
+        scriptPath,
+        "--email", account.email,
+        "--password", password,
+        ...(headless ? ["--headless"] : ["--no-headless"]),
+        "--login-only",
+      ],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          ...process.env,
+          PYTHONUNBUFFERED: "1",
+          DISPLAY: process.env.DISPLAY || ":0",
+        },
+        cwd: config.authScriptCwd,
+      }
+    );
+
+    activeProcesses.set(account.id, proc);
+
+    const exitCode = await waitForProcessExit(proc, config.authProcessTimeoutMs, account.id);
+    const stdout = await new Response(proc.stdout).text();
+    const stderr = await new Response(proc.stderr).text();
+    activeProcesses.delete(account.id);
+
+    // Parse the last JSON line from stdout
+    let result: any = null;
+    for (const line of stdout.trim().split("\n").reverse()) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("{")) {
+        try { result = JSON.parse(trimmed); break; } catch {}
+      }
+    }
+
+    if (!result) {
+      const errorMsg = stderr.trim() || `GitLab Duo script exited with code ${exitCode}`;
+      await markAccountError(account.id, errorMsg);
+      addAuthLog({ type: "login_failed", accountId: account.id, email: account.email, provider, error: errorMsg, message: errorMsg });
+      broadcast({ type: "login_failed", data: { id: account.id, email: account.email, provider, error: errorMsg } });
+      return { success: false, error: errorMsg };
+    }
+
+    if (result.success && result.pat) {
+      // Store PAT as tokens
+      const tokens = JSON.stringify({ pat: result.pat });
+      await db.update(accounts).set({
+        tokens,
+        status: "active",
+        quotaLimit: 999999,
+        quotaRemaining: 999999,
+        errorMessage: null,
+        lastLoginAt: new Date(),
+        updatedAt: new Date(),
+      }).where(eq(accounts.id, account.id));
+
+      const log = addAuthLog({
+        type: "login_success",
+        accountId: account.id,
+        email: account.email,
+        provider,
+        message: `GitLab Duo login successful, PAT created`,
+      });
+      broadcast({
+        type: "login_success",
+        data: { logId: log.id, id: account.id, email: account.email, provider, status: "active" },
+      });
+
+      return { success: true, tokens: { pat: result.pat } };
+    } else {
+      const errorMsg = result.error || "GitLab Duo login failed";
+      await markAccountError(account.id, errorMsg);
+      addAuthLog({ type: "login_failed", accountId: account.id, email: account.email, provider, error: errorMsg, message: errorMsg });
+      broadcast({ type: "login_failed", data: { id: account.id, email: account.email, provider, error: errorMsg } });
+      return { success: false, error: errorMsg };
+    }
+  } catch (e) {
+    activeProcesses.delete(account.id);
+    const errorMsg = e instanceof Error ? e.message : String(e);
+    await markAccountError(account.id, errorMsg);
+    addAuthLog({ type: "login_failed", accountId: account.id, email: account.email, provider, error: errorMsg, message: errorMsg });
+    broadcast({ type: "login_failed", data: { id: account.id, email: account.email, provider, error: errorMsg } });
+    return { success: false, error: errorMsg };
+  }
+}
+
+/**
  * Run the Python login script for a SINGLE provider.
  * Uses ENOWX_ALLOWED_PROVIDERS env to filter to just the needed provider.
  *
@@ -352,9 +462,14 @@ async function getKiroProUpgradeEnv(accountId: number): Promise<Record<string, s
  */
 export async function loginAccount(account: Account, options: LoginOptions = {}): Promise<LoginResult> {
   const password = decrypt(account.password);
-  const provider = account.provider; // kiro | codebuddy | canva
+  const provider = account.provider; // kiro | codebuddy | canva | gitlab-duo | ...
   const headless = options.headless ?? config.headless;
   const streamedEvents: ScriptEvent[] = [];
+
+  // GitLab Duo uses its own login script
+  if (provider === "gitlab-duo") {
+    return loginGitLabDuo(account, password, headless);
+  }
 
   try {
     const startLog = addAuthLog({

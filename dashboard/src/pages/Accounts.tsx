@@ -42,7 +42,7 @@ import {
   type ByokProvider,
 } from "@/lib/api";
 
-type Provider = "kiro" | "kiro-pro" | "codebuddy" | "canva" | "codex" | "qoder";
+type Provider = "kiro" | "kiro-pro" | "codebuddy" | "canva" | "codex" | "qoder" | "gitlab-duo";
 
 interface Account {
   id: number;
@@ -53,13 +53,14 @@ interface Account {
   quotaRemaining?: number;
 }
 
-const providers: Provider[] = ["kiro", "kiro-pro", "codebuddy", "canva", "codex", "qoder"];
+const providers: Provider[] = ["kiro", "kiro-pro", "codebuddy", "canva", "codex", "qoder", "gitlab-duo"];
 
 function labelProvider(provider: string) {
   if (provider === "kiro-pro") return "Kiro Pro";
   if (provider === "codebuddy") return "CodeBuddy";
   if (provider === "codex") return "Codex";
   if (provider === "qoder") return "Qoder";
+  if (provider === "gitlab-duo") return "GitLab Duo";
   return provider.charAt(0).toUpperCase() + provider.slice(1);
 }
 

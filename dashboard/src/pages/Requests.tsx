@@ -118,6 +118,7 @@ export default function Requests() {
           <option value="canva">Canva</option>
           <option value="codex">Codex</option>
           <option value="qoder">Qoder</option>
+          <option value="gitlab-duo">GitLab Duo</option>
         </select>
         <select value={apiKeyFilter} onChange={(e) => setApiKeyFilter(e.target.value)} className="h-9 rounded-md border border-[var(--border)] bg-[var(--background)] px-3 text-sm text-[var(--foreground)]">
           <option value="all">All API Keys</option>

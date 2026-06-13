@@ -49,7 +49,7 @@ interface CodeBuddyTokens {
 const CB_MODEL_MAP: Record<string, string> = {
   // Claude
   "cb-opus-4.6": "claude-opus-4.6",
-  "cb-opus-4.7": "claude-opus-4.7",
+  "cb-opus-4.7": "claude-opus-4.7-1m",
   "cb-opus-4.8": "claude-opus-4.8",
   "cb-sonnet-4.6": "claude-sonnet-4.6",
   "cb-haiku-4.5": "claude-haiku-4.5",

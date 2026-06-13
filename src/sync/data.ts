@@ -322,7 +322,7 @@ function applyUpsert(table: SyncTable, row: Record<string, unknown>): boolean {
       client.exec(`
         INSERT INTO usage_summary (bucket, provider, model, api_key_id, api_key_name, total_requests, success_requests, error_requests, prompt_tokens, completion_tokens, total_tokens, credits_used, total_duration_ms)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (bucket, provider, model) DO UPDATE SET
+        ON CONFLICT (bucket, provider, model, api_key_id) DO UPDATE SET
           total_requests = usage_summary.total_requests + excluded.total_requests,
           success_requests = usage_summary.success_requests + excluded.success_requests,
           error_requests = usage_summary.error_requests + excluded.error_requests,

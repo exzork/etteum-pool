@@ -12,10 +12,12 @@
     "setup:win": "powershell -ExecutionPolicy Bypass -File install.ps1"
   },
   "dependencies": {
+    "camoufox-js": "^0.11.0",
     "cbor-x": "^1.6.4",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.12.17",
-    "playwright": "^1.40.0"
+    "playwright": "^1.40.0",
+    "playwright-core": "^1.60.0"
   },
   "devDependencies": {
     "@types/bun": "latest",

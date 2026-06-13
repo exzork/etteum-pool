@@ -471,9 +471,19 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
   const headless = options.headless ?? config.headless;
   const streamedEvents: ScriptEvent[] = [];
 
-  // GitLab Duo uses PAT tokens directly - no browser automation
+  // GitLab Duo: use camoufox-based signup automation
   if (provider === "gitlab-duo") {
-    return { success: true, tokens: {} };
+    const { signupGitLabDuo } = await import("./gitlab-duo-signup");
+    const result = await signupGitLabDuo({
+      email: account.email,
+      password,
+      accountId: account.id,
+      headless: headless,
+    });
+    if (result.success && result.pat) {
+      return { success: true, tokens: { pat: result.pat } };
+    }
+    return { success: false, error: result.error || "GitLab Duo signup failed" };
   }
 
   try {

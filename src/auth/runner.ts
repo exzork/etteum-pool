@@ -367,7 +367,6 @@ async function loginGitLabDuo(account: Account, password: string, headless: bool
         "--email", account.email,
         "--password", password,
         ...(headless ? ["--headless"] : ["--no-headless"]),
-        "--login-only",
       ],
       {
         stdout: "pipe",
@@ -386,7 +385,7 @@ async function loginGitLabDuo(account: Account, password: string, headless: bool
 
     activeProcesses.set(account.id, proc);
 
-    const exitCode = await waitForProcessExit(proc, config.authProcessTimeoutMs, account.id);
+    const exitCode = await waitForProcessExit(proc, Math.max(config.authProcessTimeoutMs, 5 * 60 * 1000), account.id);
     const stdout = await new Response(proc.stdout).text();
     const stderr = await new Response(proc.stderr).text();
     activeProcesses.delete(account.id);

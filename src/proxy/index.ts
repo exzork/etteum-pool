@@ -41,7 +41,7 @@ interface NewRequestLog {
   apiKeyName?: string | null;
 }
 
-/** Upsert a request's stats into the usage_summary table (hourly bucket) */
+/** Upsert a request's stats into the usage_summary table (10-minute bucket) */
 async function upsertUsageSummary(entry: {
   provider: string;
   model: string;
@@ -56,7 +56,7 @@ async function upsertUsageSummary(entry: {
 }) {
   try {
     const bucket = new Date();
-    bucket.setMinutes(0, 0, 0); // truncate to hour
+    bucket.setMinutes(Math.floor(bucket.getMinutes() / 10) * 10, 0, 0); // truncate to 10-min
     const keyId = BigInt(entry.apiKeyId || 0);
 
     call.upsertUsageSummary({

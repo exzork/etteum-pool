@@ -23,9 +23,13 @@ function clampNumber(value: string | undefined, fallback: number, min: number, m
   return Math.min(max, Math.max(min, Math.floor(parsed)));
 }
 
-function bucketKey(bucket: string, grain: "hour" | "day" | "month"): string {
+function bucketKey(bucket: string, grain: "10min" | "hour" | "day" | "month"): string {
   const d = new Date(bucket);
   switch (grain) {
+    case "10min": {
+      const m = Math.floor(d.getUTCMinutes() / 10) * 10;
+      return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}T${String(d.getUTCHours()).padStart(2, "0")}:${String(m).padStart(2, "0")}:00Z`;
+    }
     case "hour":
       return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}T${String(d.getUTCHours()).padStart(2, "0")}:00:00Z`;
     case "day":
@@ -156,9 +160,11 @@ statsRouter.get("/usage", async (c) => {
   const isAll = range === "all";
   const since = new Date(Date.now() - hours * 60 * 60 * 1000);
 
-  const grain: "hour" | "day" | "month" = isAll
+  const grain: "10min" | "hour" | "day" | "month" = isAll
     ? "month"
-    : hours <= 48
+    : hours <= 24
+    ? "10min"
+    : hours <= 72
     ? "hour"
     : hours <= 24 * 32
       ? "day"

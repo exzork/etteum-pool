@@ -37,6 +37,7 @@ interface CompressionStats {
   saved: number;
   savedPct: number;
   byTechnique?: {
+    tsc?: number;
     rtk?: number;
     dcp?: number;
     caveman?: number;
@@ -282,6 +283,7 @@ function Metric({ label, value, color }: { label: string; value: string | number
 }
 
 const TECHNIQUE_LABELS: Record<keyof NonNullable<CompressionStats["byTechnique"]>, string> = {
+  tsc: "TSC (tool schema)",
   rtk: "RTK (tool truncation)",
   dcp: "DCP (dedup)",
   caveman: "Caveman (system prompt)",

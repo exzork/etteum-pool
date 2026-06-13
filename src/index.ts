@@ -173,7 +173,7 @@ app.get("/api/sync/status", async (c) => {
 });
 
 // Serve dashboard static files (SPA fallback)
-const dashboardDist = new URL("../dashboard/dist", import.meta.url).pathname;
+const dashboardDist = new URL("../dashboard/dist", import.meta.url).pathname.replace(/^\/([A-Z]:)/i, "$1");
 const dashboardIndex = `${dashboardDist}/index.html`;
 
 const staticMimeTypes: Record<string, string> = {

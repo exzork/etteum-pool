@@ -471,9 +471,9 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
   const headless = options.headless ?? config.headless;
   const streamedEvents: ScriptEvent[] = [];
 
-  // GitLab Duo uses its own login script
+  // GitLab Duo uses PAT tokens directly - no browser automation
   if (provider === "gitlab-duo") {
-    return loginGitLabDuo(account, password, headless);
+    return { success: true, tokens: {} };
   }
 
   try {

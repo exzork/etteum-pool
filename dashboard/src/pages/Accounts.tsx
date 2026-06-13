@@ -334,14 +334,34 @@ export default function Accounts() {
   async function handleCookieLogin() {
     if (!cookieValue.trim()) { showError(new Error("Paste Personal Access Token (PAT)")); return; }
     try {
-      const res = await fetchApi<any>("/api/accounts", {
-        method: "POST",
-        body: JSON.stringify({
-          provider: "qoder",
-          personalToken: cookieValue.trim(),
-        }),
-      });
-      showSuccess("Qoder account added successfully");
+      if (addDialogProvider === "gitlab-duo") {
+        // GitLab Duo: create account with PAT directly
+        const lines = cookieValue.trim().split("\n").map((l) => l.trim()).filter(Boolean);
+        let added = 0;
+        for (const pat of lines) {
+          const res = await fetchApi<any>("/api/accounts", {
+            method: "POST",
+            body: JSON.stringify({ provider: "gitlab-duo", email: `gitlab-${Date.now()}-${added}@pat`, password: "pat-only" }),
+          });
+          if (res?.id) {
+            await fetchApi(`/api/accounts/${res.id}`, {
+              method: "PATCH",
+              body: JSON.stringify({ tokens: { pat: pat.startsWith("glpat-") ? pat : pat }, status: "active", quotaRemaining: 999999, quotaLimit: 999999 }),
+            });
+            added++;
+          }
+        }
+        showSuccess(`Added ${added} GitLab Duo account(s)`);
+      } else {
+        const res = await fetchApi<any>("/api/accounts", {
+          method: "POST",
+          body: JSON.stringify({
+            provider: "qoder",
+            personalToken: cookieValue.trim(),
+          }),
+        });
+        showSuccess("Qoder account added successfully");
+      }
       setCookieValue("");
       setAddDialogProvider(null);
       await load();
@@ -526,7 +546,7 @@ export default function Accounts() {
 
   function handleOpenAddDialog(provider: Provider) {
     resetCodexOAuthFlow();
-    if (provider === "codex") {
+    if (provider === "codex" || provider === "gitlab-duo") {
       setAddMode("pat");
     }
     setAddDialogProvider(provider);
@@ -1246,12 +1266,16 @@ export default function Accounts() {
                 ? "Add via browser login or instant login with API key/token."
                 : addDialogProvider === "qoder"
                 ? "Add via PAT, bulk Google accounts, or single account."
+                : addDialogProvider === "gitlab-duo"
+                ? "Add via GitLab Personal Access Token (PAT). One token per line."
                 : `Add account for ${addDialogProvider ? labelProvider(addDialogProvider) : "this provider"}.`}
             </DialogDescription>
           </DialogHeader>
 
           {/* Mode tabs */}
-          {addDialogProvider === "kiro-pro" || addDialogProvider === "codex" ? (
+          {addDialogProvider === "gitlab-duo" ? (
+            null /* PAT only, no tabs needed */
+          ) : addDialogProvider === "kiro-pro" || addDialogProvider === "codex" ? (
             <div className="flex gap-1 rounded-md bg-[var(--secondary)] p-1">
               <button onClick={() => setAddMode("instant")}
                 className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${addMode === "instant" ? "bg-[var(--background)] text-[var(--foreground)] shadow-sm" : "text-[var(--muted-foreground)]"}`}
@@ -1305,6 +1329,25 @@ export default function Accounts() {
               <div className="flex justify-end gap-2">
                 <Button variant="outline" onClick={() => setAddDialogProvider(null)}>Cancel</Button>
                 <Button onClick={handleCookieLogin}>Add Account</Button>
+              </div>
+            </div>
+          )}
+
+          {addMode === "pat" && addDialogProvider === "gitlab-duo" && (
+            <div className="space-y-4">
+              <div>
+                <label className="text-sm text-[var(--foreground)]">GitLab Personal Access Token(s)</label>
+                <textarea
+                  value={cookieValue}
+                  onChange={(e) => setCookieValue(e.target.value)}
+                  className="mt-1 w-full h-40 rounded-md border border-[var(--border)] bg-[var(--background)] p-3 text-sm font-mono text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--ring)] resize-none"
+                  placeholder={"glpat-xxxxxxxxxxxxxxxxxxxx\nglpat-yyyyyyyyyyyyyyyyyyyy"}
+                />
+                <p className="mt-1 text-xs text-[var(--muted-foreground)]">Paste GitLab PAT(s) with <code>api</code> scope. One token per line. Each token creates one account.</p>
+              </div>
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setAddDialogProvider(null)}>Cancel</Button>
+                <Button onClick={handleCookieLogin}>Add Account(s)</Button>
               </div>
             </div>
           )}

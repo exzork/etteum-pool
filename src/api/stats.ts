@@ -23,19 +23,32 @@ function clampNumber(value: string | undefined, fallback: number, min: number, m
   return Math.min(max, Math.max(min, Math.floor(parsed)));
 }
 
-function bucketKey(bucket: string, grain: "10min" | "hour" | "day" | "month"): string {
+function bucketKey(bucket: string, grain: "5min" | "30min" | "3h" | "day" | "week"): string {
   const d = new Date(bucket);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const Y = d.getUTCFullYear(), M = pad(d.getUTCMonth() + 1), D = pad(d.getUTCDate()), H = pad(d.getUTCHours());
   switch (grain) {
-    case "10min": {
-      const m = Math.floor(d.getUTCMinutes() / 10) * 10;
-      return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}T${String(d.getUTCHours()).padStart(2, "0")}:${String(m).padStart(2, "0")}:00Z`;
+    case "5min": {
+      const m = Math.floor(d.getUTCMinutes() / 5) * 5;
+      return `${Y}-${M}-${D}T${H}:${pad(m)}:00Z`;
     }
-    case "hour":
-      return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}T${String(d.getUTCHours()).padStart(2, "0")}:00:00Z`;
+    case "30min": {
+      const m = Math.floor(d.getUTCMinutes() / 30) * 30;
+      return `${Y}-${M}-${D}T${H}:${pad(m)}:00Z`;
+    }
+    case "3h": {
+      const h = Math.floor(d.getUTCHours() / 3) * 3;
+      return `${Y}-${M}-${D}T${pad(h)}:00:00Z`;
+    }
     case "day":
-      return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}T00:00:00Z`;
-    case "month":
-      return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-01T00:00:00Z`;
+      return `${Y}-${M}-${D}T00:00:00Z`;
+    case "week": {
+      // Snap to Monday of the week
+      const day = d.getUTCDay();
+      const diff = (day === 0 ? -6 : 1) - day;
+      const monday = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + diff));
+      return `${monday.getUTCFullYear()}-${pad(monday.getUTCMonth() + 1)}-${pad(monday.getUTCDate())}T00:00:00Z`;
+    }
   }
 }
 
@@ -160,15 +173,20 @@ statsRouter.get("/usage", async (c) => {
   const isAll = range === "all";
   const since = new Date(Date.now() - hours * 60 * 60 * 1000);
 
-  const grain: "10min" | "hour" | "day" | "month" = isAll
-    ? "month"
+  // Target ~288 data points per period:
+  // 1d (24h): 24*60/5 = 288 → 5min
+  // 7d (168h): 7*24*2 = 336 → 30min (close to 288)
+  // 30d (720h): 30*8 = 240 → 3h (close to 288)
+  // all: variable, use 1 week
+  const grain: "5min" | "30min" | "3h" | "day" | "week" = isAll
+    ? "week"
     : hours <= 24
-    ? "10min"
+    ? "5min"
     : hours <= 24 * 7
-    ? "hour"
+    ? "30min"
     : hours <= 24 * 30
-      ? "day"
-      : "month";
+      ? "3h"
+      : "day";
 
   let summaries = db.usageSummary.getAll();
 

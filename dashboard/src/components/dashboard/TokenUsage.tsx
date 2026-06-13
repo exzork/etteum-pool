@@ -57,15 +57,22 @@ function modelKey(row: { provider?: string; model?: string }) {
 
 // ─── Local-timezone bucket helpers ──────────────────────────────────────────
 
-/** Truncate a Date to the start of its 10-minute slot in the user's local timezone */
-function trunc10MinLocal(d: Date): number {
-  const m = Math.floor(d.getMinutes() / 10) * 10;
+/** Truncate a Date to the start of its 5-minute slot in the user's local timezone */
+function trunc5MinLocal(d: Date): number {
+  const m = Math.floor(d.getMinutes() / 5) * 5;
   return new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), m).getTime();
 }
 
-/** Truncate a Date to the start of its hour in the user's local timezone */
-function truncHourLocal(d: Date): number {
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours()).getTime();
+/** Truncate a Date to the start of its 30-minute slot in the user's local timezone */
+function trunc30MinLocal(d: Date): number {
+  const m = Math.floor(d.getMinutes() / 30) * 30;
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), m).getTime();
+}
+
+/** Truncate a Date to the start of its 3-hour slot in the user's local timezone */
+function trunc3HLocal(d: Date): number {
+  const h = Math.floor(d.getHours() / 3) * 3;
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), h).getTime();
 }
 
 /** Truncate a Date to the start of its day in the user's local timezone */
@@ -73,9 +80,11 @@ function truncDayLocal(d: Date): number {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
 }
 
-/** Truncate a Date to the start of its month in the user's local timezone */
-function truncMonthLocal(d: Date): number {
-  return new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+/** Truncate a Date to the start of its ISO week (Monday) in the user's local timezone */
+function truncWeekLocal(d: Date): number {
+  const day = d.getDay();
+  const diff = (day === 0 ? -6 : 1) - day;
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + diff).getTime();
 }
 
 /**
@@ -84,10 +93,10 @@ function truncMonthLocal(d: Date): number {
  */
 function snapToLocalBucket(utcEpoch: number, period: string): number {
   const d = new Date(utcEpoch);
-  if (period === "1d") return trunc10MinLocal(d);
-  if (period === "7d") return truncHourLocal(d);
-  if (period === "30d") return truncDayLocal(d);
-  return truncMonthLocal(d);
+  if (period === "1d") return trunc5MinLocal(d);
+  if (period === "7d") return trunc30MinLocal(d);
+  if (period === "30d") return trunc3HLocal(d);
+  return truncWeekLocal(d);
 }
 
 /** Convert a backend hour key (ISO UTC) to a numeric epoch (ms) */
@@ -98,60 +107,64 @@ function parseBucketKey(isoKey: string): number {
 /** Format a bucket epoch to a display label in user's local timezone */
 function formatLabel(epoch: number, period: string): string {
   const d = new Date(epoch);
+  const pad = (n: number) => String(n).padStart(2, "0");
   if (period === "1d") {
-    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
   }
   if (period === "7d") {
-    return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:00`;
+    return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
   }
   if (period === "30d") {
-    return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:00`;
   }
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  // all (weekly)
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 /**
  * Generate ordered bucket epochs for the chart, all in the user's local
- * timezone so labels read naturally.
+ * timezone so labels read naturally. Targets ~288 data points per period.
  *
- * - **1d** — 144 ten-minute buckets as a rolling 24h window (now-24h → now).
- * - **7d** — 168 hourly buckets (7 days × 24 hours).
- * - **30d** — 30 daily buckets ending today.
- * - **all** — last 12 monthly buckets.
+ * - **1d** — 288 five-minute buckets (24h).
+ * - **7d** — 336 thirty-minute buckets (7 days).
+ * - **30d** — 240 three-hour buckets (30 days).
+ * - **all** — weekly buckets (last 52 weeks).
  */
 function generateBuckets(period: string): number[] {
   const now = new Date();
   const buckets: number[] = [];
 
   if (period === "1d") {
-    // Rolling 24h window: (now - 24h) → now, 10-minute buckets
-    const now10 = trunc10MinLocal(now);
-    for (let i = 143; i >= 0; i--) {
-      buckets.push(now10 - i * 600_000);
+    // 288 × 5min = 24h
+    const start = trunc5MinLocal(now);
+    for (let i = 287; i >= 0; i--) {
+      buckets.push(start - i * 5 * 60_000);
     }
     return buckets;
   }
 
   if (period === "7d") {
-    // Rolling 7d window: hourly buckets
-    const nowHour = truncHourLocal(now);
-    for (let i = 167; i >= 0; i--) {
-      buckets.push(nowHour - i * 3600_000);
+    // 336 × 30min = 7d
+    const start = trunc30MinLocal(now);
+    for (let i = 335; i >= 0; i--) {
+      buckets.push(start - i * 30 * 60_000);
     }
     return buckets;
   }
 
   if (period === "30d") {
-    for (let i = 29; i >= 0; i--) {
-      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
-      buckets.push(d.getTime());
+    // 240 × 3h = 30d
+    const start = trunc3HLocal(now);
+    for (let i = 239; i >= 0; i--) {
+      buckets.push(start - i * 3 * 3600_000);
     }
     return buckets;
   }
 
-  // "all" — last 12 months
-  for (let i = 11; i >= 0; i--) {
-    buckets.push(new Date(now.getFullYear(), now.getMonth() - i, 1).getTime());
+  // "all" — last 52 weeks
+  const startWeek = truncWeekLocal(now);
+  for (let i = 51; i >= 0; i--) {
+    buckets.push(startWeek - i * 7 * 24 * 3600_000);
   }
   return buckets;
 }

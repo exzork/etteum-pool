@@ -7,7 +7,7 @@ import {
   type ProviderQuotaSnapshot,
   type ProviderResult,
 } from "./base";
-import type { Account } from "../../db/schema";
+import type { Account } from "../../db/index";
 import { config } from "../../config";
 import path from "path";
 

@@ -1,14 +1,12 @@
 import { Hono } from "hono";
-import { db } from "../db/index";
-import { filterRules } from "../db/schema";
-import { eq, asc, sql } from "drizzle-orm";
+import { db, call, type FilterRule } from "../db/index";
 import { invalidateFilterCache } from "../proxy/filter-cache";
 import { broadcast } from "../ws/index";
 
 export const filtersRouter = new Hono();
 
 filtersRouter.get("/", async (c) => {
-  const rules = await db.select().from(filterRules).orderBy(asc(filterRules.sortOrder));
+  const rules = db.filterRules.getAll().sort((a, b) => a.sortOrder - b.sortOrder);
   return c.json({ count: rules.length, activeCount: rules.filter((r) => r.isActive).length, rules });
 });
 
@@ -29,31 +27,32 @@ filtersRouter.post("/", async (c) => {
     }
   }
 
-  const [maxRow] = await db
-    .select({ maxOrder: sql<number>`COALESCE(MAX(${filterRules.sortOrder}), 0)` })
-    .from(filterRules);
+  const allRules = db.filterRules.getAll();
+  const maxOrder = allRules.reduce((max, r) => Math.max(max, r.sortOrder), 0);
 
   const ruleId = body.ruleId?.trim() || `rule_${crypto.randomUUID().slice(0, 8)}`;
+  const id = BigInt(Date.now());
 
-  const [created] = await db
-    .insert(filterRules)
-    .values({
-      ruleId,
-      pattern: body.pattern,
-      replacement: body.replacement ?? "",
-      isRegex: Boolean(body.isRegex),
-      isActive: body.isActive !== false,
-      sortOrder: Number(maxRow?.maxOrder || 0) + 1,
-    })
-    .returning();
+  await call.upsertFilterRule({
+    id,
+    ruleId,
+    pattern: body.pattern,
+    replacement: body.replacement ?? "",
+    isRegex: Boolean(body.isRegex),
+    isActive: body.isActive !== false,
+    sortOrder: maxOrder + 1,
+  });
 
   invalidateFilterCache();
   broadcast({ type: "filter_rules_updated", data: {} });
-  return c.json(created, 201);
+
+  // Return the created rule
+  const created = db.filterRules.getAll().find((r) => r.ruleId === ruleId);
+  return c.json(created || { id, ruleId, pattern: body.pattern, replacement: body.replacement ?? "", isRegex: Boolean(body.isRegex), isActive: body.isActive !== false, sortOrder: maxOrder + 1 }, 201);
 });
 
 filtersRouter.patch("/:id", async (c) => {
-  const id = Number(c.req.param("id"));
+  const id = BigInt(c.req.param("id"));
   const body = await c.req.json<{
     pattern?: string;
     replacement?: string;
@@ -62,37 +61,38 @@ filtersRouter.patch("/:id", async (c) => {
     sortOrder?: number;
   }>();
 
-  const updates: Record<string, unknown> = { updatedAt: new Date() };
-  if (typeof body.pattern === "string") {
-    if (body.isRegex ?? false) {
-      try { new RegExp(body.pattern); } catch (e) {
-        return c.json({ error: `Invalid regex: ${(e as Error).message}` }, 400);
-      }
+  const existing = db.filterRules.getAll().find((r) => r.id === id);
+  if (!existing) return c.json({ error: "Not found" }, 404);
+
+  if (typeof body.pattern === "string" && (body.isRegex ?? existing.isRegex)) {
+    try { new RegExp(body.pattern); } catch (e) {
+      return c.json({ error: `Invalid regex: ${(e as Error).message}` }, 400);
     }
-    updates.pattern = body.pattern;
   }
-  if (typeof body.replacement === "string") updates.replacement = body.replacement;
-  if (typeof body.isRegex === "boolean") updates.isRegex = body.isRegex;
-  if (typeof body.isActive === "boolean") updates.isActive = body.isActive;
-  if (typeof body.sortOrder === "number") updates.sortOrder = body.sortOrder;
 
-  const [updated] = await db
-    .update(filterRules)
-    .set(updates)
-    .where(eq(filterRules.id, id))
-    .returning();
-
-  if (!updated) return c.json({ error: "Not found" }, 404);
+  await call.upsertFilterRule({
+    id,
+    ruleId: existing.ruleId,
+    pattern: body.pattern ?? existing.pattern,
+    replacement: body.replacement ?? existing.replacement,
+    isRegex: body.isRegex ?? existing.isRegex,
+    isActive: body.isActive ?? existing.isActive,
+    sortOrder: body.sortOrder ?? existing.sortOrder,
+  });
 
   invalidateFilterCache();
   broadcast({ type: "filter_rules_updated", data: {} });
-  return c.json(updated);
+
+  const updated = db.filterRules.getAll().find((r) => r.id === id);
+  return c.json(updated || existing);
 });
 
 filtersRouter.delete("/:id", async (c) => {
-  const id = Number(c.req.param("id"));
-  const result = await db.delete(filterRules).where(eq(filterRules.id, id)).returning();
-  if (result.length === 0) return c.json({ error: "Not found" }, 404);
+  const id = BigInt(c.req.param("id"));
+  const existing = db.filterRules.getAll().find((r) => r.id === id);
+  if (!existing) return c.json({ error: "Not found" }, 404);
+
+  await call.deleteFilterRule({ id });
 
   invalidateFilterCache();
   broadcast({ type: "filter_rules_updated", data: {} });

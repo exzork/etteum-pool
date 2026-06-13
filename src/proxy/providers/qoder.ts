@@ -6,7 +6,7 @@ import {
   type ProviderHealthResult,
   type ProviderResult,
 } from "./base";
-import type { Account } from "../../db/schema";
+import type { Account } from "../../db/index";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";

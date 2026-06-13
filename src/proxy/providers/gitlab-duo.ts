@@ -6,7 +6,7 @@ import {
   type ModelInfo,
   type ProviderResult,
 } from "./base";
-import type { Account } from "../../db/schema";
+import type { Account } from "../../db/index";
 
 // ============================================================================
 // GitLab Duo Provider

@@ -5,10 +5,7 @@ import {
   type ModelInfo,
   type ProviderResult,
 } from "./base";
-import type { Account } from "../../db/schema";
-import { db } from "../../db/index";
-import { accounts } from "../../db/schema";
-import { eq } from "drizzle-orm";
+import { db, type Account } from "../../db/index";
 import { config } from "../../config";
 import { decrypt } from "../../utils/crypto";
 
@@ -76,10 +73,7 @@ export class ByokProvider extends BaseProvider {
   }
 
   private async loadFromDb(): Promise<void> {
-    const byokAccounts = await db
-      .select()
-      .from(accounts)
-      .where(eq(accounts.provider, "byok"));
+    const byokAccounts = db.accounts.getByProvider("byok");
 
     // Build new data in temporary variables first to avoid race condition
     const newPrefixCache = new Map<string, CachedByokAccount>();

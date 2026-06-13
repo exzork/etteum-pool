@@ -4,9 +4,6 @@ import { warmupQueue } from "./warmup-queue";
 import { autoWarmupScheduler } from "./warmup-scheduler";
 import { loginAllProviders, stopLoginProcess, getActiveProcessIds } from "./runner";
 import { db } from "../db/index";
-import { accounts } from "../db/schema";
-import { eq } from "drizzle-orm";
-import { encrypt } from "../utils/crypto";
 import { addAuthLog, clearAuthLogs, getAuthLogs } from "./logs";
 import { broadcast } from "../ws/index";
 
@@ -28,10 +25,7 @@ function emptyLoginOptions(): { headless?: boolean; concurrency?: number } {
 authRouter.post("/login/:id", async (c) => {
   const id = Number(c.req.param("id"));
   const body = await c.req.json<{ headless?: boolean }>().catch(emptyLoginOptions);
-  const [account] = await db
-    .select()
-    .from(accounts)
-    .where(eq(accounts.id, id));
+  const account = db.accounts.findById(BigInt(id));
 
   if (!account) {
     return c.json({ error: "Account not found" }, 404);
@@ -283,7 +277,7 @@ authRouter.put("/queue/concurrency", async (c) => {
  */
 authRouter.post("/warmup/:id", async (c) => {
   const id = Number(c.req.param("id"));
-  const [account] = await db.select().from(accounts).where(eq(accounts.id, id));
+  const account = db.accounts.findById(BigInt(id));
   if (!account) return c.json({ error: "Account not found" }, 404);
 
   warmupQueue.enqueue(id);

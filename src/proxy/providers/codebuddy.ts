@@ -7,7 +7,7 @@ import {
   type ProviderResult,
   type StreamChunk,
 } from "./base";
-import type { Account } from "../../db/schema";
+import type { Account } from "../../db/index";
 import { config } from "../../config";
 
 

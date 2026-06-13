@@ -1,7 +1,5 @@
 import { Hono } from "hono";
-import { db } from "../db/index";
-import { settings } from "../db/schema";
-import { eq } from "drizzle-orm";
+import { db, call, type Setting } from "../db/index";
 import { config } from "../config";
 import { pool } from "../proxy/pool";
 import { autoWarmupScheduler, isAutoWarmupSettingKey } from "../auth/warmup-scheduler";
@@ -24,8 +22,8 @@ proxySettingsRouter.get("/providers", async (c) => {
  * GET /api/settings - Get all settings
  */
 proxySettingsRouter.get("/", async (c) => {
-  const allSettings = await db.select().from(settings);
-  const settingsMap: Record<string, string | null> = {};
+  const allSettings = db.settings.getAll();
+  const settingsMap: Record<string, string | undefined> = {};
   for (const s of allSettings) {
     settingsMap[s.key] = s.value;
   }
@@ -37,10 +35,7 @@ proxySettingsRouter.get("/", async (c) => {
  */
 proxySettingsRouter.get("/:key", async (c) => {
   const key = c.req.param("key");
-  const [setting] = await db
-    .select()
-    .from(settings)
-    .where(eq(settings.key, key));
+  const setting = db.settings.getRow(key);
 
   if (!setting) {
     return c.json({ error: "Setting not found" }, 404);
@@ -60,20 +55,7 @@ proxySettingsRouter.put("/:key", async (c) => {
     return c.json({ error: "value is required" }, 400);
   }
 
-  // Upsert
-  const existing = await db
-    .select()
-    .from(settings)
-    .where(eq(settings.key, key));
-
-  if (existing.length > 0) {
-    await db
-      .update(settings)
-      .set({ value: body.value, updatedAt: new Date() })
-      .where(eq(settings.key, key));
-  } else {
-    await db.insert(settings).values({ key, value: body.value });
-  }
+  await call.upsertSetting({ key, value: body.value });
 
   if (key === "load_balancing_method" || /^provider_.+_lb_method$/.test(key)) {
     pool.invalidateLoadBalancingCache();
@@ -95,14 +77,13 @@ proxySettingsRouter.put("/:key", async (c) => {
  */
 proxySettingsRouter.delete("/:key", async (c) => {
   const key = c.req.param("key");
-  const result = await db
-    .delete(settings)
-    .where(eq(settings.key, key))
-    .returning();
+  const existing = db.settings.getRow(key);
 
-  if (result.length === 0) {
+  if (!existing) {
     return c.json({ error: "Setting not found" }, 404);
   }
+
+  await call.deleteSetting({ key });
 
   return c.json({ success: true, deleted: key });
 });
@@ -117,19 +98,7 @@ proxySettingsRouter.put("/", async (c) => {
   let warmupTouched = false;
   let proxyPoolTouched = false;
   for (const [key, value] of Object.entries(body)) {
-    const existing = await db
-      .select()
-      .from(settings)
-      .where(eq(settings.key, key));
-
-    if (existing.length > 0) {
-      await db
-        .update(settings)
-        .set({ value, updatedAt: new Date() })
-        .where(eq(settings.key, key));
-    } else {
-      await db.insert(settings).values({ key, value });
-    }
+    await call.upsertSetting({ key, value });
 
     if (key === "load_balancing_method" || /^provider_.+_lb_method$/.test(key)) {
       lbCacheTouched = true;

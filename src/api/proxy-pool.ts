@@ -1,7 +1,5 @@
 import { Hono } from "hono";
-import { db } from "../db/index";
-import { proxyPool } from "../db/schema";
-import { eq, desc, sql, inArray } from "drizzle-orm";
+import { db, call, type ProxyPoolEntry } from "../db/index";
 import {
   getNextProxy,
   markProxySuccess,
@@ -20,10 +18,7 @@ import {
 export const proxyPoolRouter = new Hono();
 
 proxyPoolRouter.get("/pool", async (c) => {
-  const proxies = await db
-    .select()
-    .from(proxyPool)
-    .orderBy(desc(proxyPool.createdAt));
+  const proxies = db.proxyPool.getAll().sort((a, b) => Number(b.createdAt - a.createdAt));
 
   return c.json({
     count: proxies.length,
@@ -43,10 +38,18 @@ proxyPoolRouter.post("/pool", async (c) => {
     const trimmed = url.trim();
     if (!trimmed) continue;
 
-    const type = trimmed.startsWith("socks5://") ? "socks5" : "http";
+    const proxyType = trimmed.startsWith("socks5://") ? "socks5" : "http";
     const label = new URL(trimmed).hostname || trimmed;
 
-    await db.insert(proxyPool).values({ url: trimmed, type, label });
+    await call.upsertProxy({
+      id: BigInt(Date.now() + added),
+      url: trimmed,
+      proxyType,
+      label,
+      status: "active",
+      latencyMs: null,
+      errorMessage: null,
+    });
     added++;
   }
 
@@ -55,74 +58,81 @@ proxyPoolRouter.post("/pool", async (c) => {
 });
 
 proxyPoolRouter.put("/pool/:id", async (c) => {
-  const id = Number(c.req.param("id"));
+  const id = BigInt(c.req.param("id"));
   const body = await c.req.json<{ status?: string; label?: string }>();
 
-  const updates: Record<string, any> = { updatedAt: new Date() };
-  if (body.status) updates.status = body.status;
-  if (body.label !== undefined) updates.label = body.label;
+  const existing = db.proxyPool.getAll().find((p) => p.id === id);
+  if (!existing) return c.json({ error: "Proxy not found" }, 404);
 
-  await db.update(proxyPool).set(updates).where(eq(proxyPool.id, id));
+  await call.upsertProxy({
+    id,
+    url: existing.url,
+    proxyType: existing.proxyType,
+    label: body.label !== undefined ? body.label : (existing.label ?? null),
+    status: body.status || existing.status,
+    latencyMs: existing.latencyMs ?? null,
+    errorMessage: existing.errorMessage ?? null,
+  });
+
   invalidateProxyCache();
-
   return c.json({ success: true });
 });
 
 proxyPoolRouter.delete("/pool/:id", async (c) => {
-  const id = Number(c.req.param("id"));
-  await db.delete(proxyPool).where(eq(proxyPool.id, id));
+  const id = BigInt(c.req.param("id"));
+  await call.deleteProxy({ id });
   invalidateProxyCache();
   return c.json({ success: true });
 });
 
 proxyPoolRouter.delete("/pool", async (c) => {
-  await db.delete(proxyPool);
+  const allProxies = db.proxyPool.getAll();
+  for (const proxy of allProxies) {
+    await call.deleteProxy({ id: proxy.id });
+  }
   invalidateProxyCache();
   return c.json({ success: true });
 });
 
 proxyPoolRouter.post("/pool/:id/check", async (c) => {
-  const id = Number(c.req.param("id"));
-  const [proxy] = await db.select().from(proxyPool).where(eq(proxyPool.id, id));
+  const id = BigInt(c.req.param("id"));
+  const proxy = db.proxyPool.getAll().find((p) => p.id === id);
   if (!proxy) return c.json({ error: "Proxy not found" }, 404);
 
   const result = await checkProxyHealth(proxy.url);
 
-  await db
-    .update(proxyPool)
-    .set({
-      status: result.ok ? "active" : "error",
-      errorMessage: result.error || null,
-      latencyMs: result.latencyMs,
-      lastCheckedAt: new Date(),
-      updatedAt: new Date(),
-    })
-    .where(eq(proxyPool.id, id));
+  await call.updateProxyStats({
+    id,
+    successCount: proxy.successCount,
+    failCount: proxy.failCount,
+    lastUsedAt: proxy.lastUsedAt ?? null,
+    lastCheckedAt: BigInt(Date.now()),
+    latencyMs: result.latencyMs != null ? BigInt(result.latencyMs) : null,
+    status: result.ok ? "active" : "error",
+    errorMessage: result.error || null,
+  });
 
   invalidateProxyCache();
-  return c.json({ id, ...result });
+  return c.json({ id: Number(id), ...result });
 });
 
 proxyPoolRouter.post("/pool/check-all", async (c) => {
-  const proxies = await db
-    .select()
-    .from(proxyPool)
-    .where(eq(proxyPool.status, "active"));
+  const proxies = db.proxyPool.getActive();
 
   const results = await Promise.allSettled(
     proxies.map(async (proxy) => {
       const result = await checkProxyHealth(proxy.url);
-      await db
-        .update(proxyPool)
-        .set({
-          status: result.ok ? "active" : "error",
-          errorMessage: result.error || null,
-          latencyMs: result.latencyMs,
-          lastCheckedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(eq(proxyPool.id, proxy.id));
-      return { id: proxy.id, url: proxy.url, ...result };
+      await call.updateProxyStats({
+        id: proxy.id,
+        successCount: proxy.successCount,
+        failCount: proxy.failCount,
+        lastUsedAt: proxy.lastUsedAt ?? null,
+        lastCheckedAt: BigInt(Date.now()),
+        latencyMs: result.latencyMs != null ? BigInt(result.latencyMs) : null,
+        status: result.ok ? "active" : "error",
+        errorMessage: result.error || null,
+      });
+      return { id: Number(proxy.id), url: proxy.url, ...result };
     })
   );
 
@@ -170,25 +180,24 @@ proxyPoolRouter.post("/scrape", async (c) => {
   }
 
   // Skip proxies already in the pool (dedupe by URL).
-  const urls = scraped.map((p) => p.url);
-  const existing =
-    urls.length > 0
-      ? await db
-          .select({ url: proxyPool.url })
-          .from(proxyPool)
-          .where(inArray(proxyPool.url, urls))
-      : [];
-  const existingSet = new Set(existing.map((e) => e.url));
+  const existingProxies = db.proxyPool.getAll();
+  const existingSet = new Set(existingProxies.map((e) => e.url));
 
   const toInsert = scraped.filter((p) => !existingSet.has(p.url));
   if (toInsert.length > 0) {
-    await db.insert(proxyPool).values(
-      toInsert.map((p) => ({
+    const baseTs = Date.now();
+    for (let i = 0; i < toInsert.length; i++) {
+      const p = toInsert[i];
+      await call.upsertProxy({
+        id: BigInt(baseTs + i),
         url: p.url,
-        type: p.type,
+        proxyType: p.type,
         label: p.country ? `scraped:${p.country}` : "scraped",
-      })),
-    );
+        status: "active",
+        latencyMs: null,
+        errorMessage: null,
+      });
+    }
     invalidateProxyCache();
   }
 

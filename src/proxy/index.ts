@@ -1,7 +1,6 @@
 import { Hono } from "hono";
 import { routeRequest, getAllModels, providers } from "./router";
-import { db } from "../db/index";
-import { requestLogs, usageSummary, type NewRequestLog } from "../db/schema";
+import { call } from "../db/index";
 import { pool } from "./pool";
 import { broadcast } from "../ws/index";
 import type { ChatCompletionRequest, CreditSource } from "./providers/base";
@@ -14,13 +13,33 @@ import {
 import { isBadUpstreamRequest, isInvalidModelError } from "./errors";
 import { prepareLogBody } from "./logging";
 import { resolveModelAlias } from "./model-mapping";
-import { eq, sql } from "drizzle-orm";
 import { providerList, refreshByokModels } from "./providers/registry";
 import type { ResolvedApiKey } from "../api/keys";
 
 export const proxyRouter = new Hono();
 
 const MAX_REQUEST_LOGS = 50;
+
+/** NewRequestLog shape for the new DB layer */
+interface NewRequestLog {
+  accountId?: number | bigint | null;
+  accountEmail?: string | null;
+  provider: string;
+  model?: string | null;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  creditsUsed?: number;
+  status: string;
+  durationMs?: number;
+  errorMessage?: string | null;
+  requestBody?: string | null;
+  responseBody?: string | null;
+  accountQuotaBefore?: number;
+  accountQuotaAfter?: number;
+  apiKeyId?: number | bigint | null;
+  apiKeyName?: string | null;
+}
 
 /** Upsert a request's stats into the usage_summary table (hourly bucket) */
 async function upsertUsageSummary(entry: {
@@ -32,30 +51,29 @@ async function upsertUsageSummary(entry: {
   totalTokens: number;
   creditsUsed: number;
   durationMs: number;
-  apiKeyId?: number;
+  apiKeyId?: number | bigint;
   apiKeyName?: string;
 }) {
   try {
     const bucket = new Date();
     bucket.setMinutes(0, 0, 0); // truncate to hour
-    const keyId = entry.apiKeyId || 0;
+    const keyId = BigInt(entry.apiKeyId || 0);
 
-    await db.run(sql`
-      INSERT INTO usage_summary (bucket, provider, model, total_requests, success_requests, error_requests, prompt_tokens, completion_tokens, total_tokens, credits_used, total_duration_ms, api_key_id, api_key_name)
-      VALUES (${bucket.toISOString()}, ${entry.provider || "unknown"}, ${entry.model || "unknown"}, 1,
-        ${entry.status === "success" ? 1 : 0}, ${entry.status === "error" ? 1 : 0},
-        ${entry.promptTokens || 0}, ${entry.completionTokens || 0}, ${entry.totalTokens || 0},
-        ${entry.creditsUsed || 0}, ${entry.durationMs || 0}, ${keyId}, ${entry.apiKeyName || null})
-      ON CONFLICT (bucket, provider, model, api_key_id) DO UPDATE SET
-        total_requests = usage_summary.total_requests + excluded.total_requests,
-        success_requests = usage_summary.success_requests + excluded.success_requests,
-        error_requests = usage_summary.error_requests + excluded.error_requests,
-        prompt_tokens = usage_summary.prompt_tokens + excluded.prompt_tokens,
-        completion_tokens = usage_summary.completion_tokens + excluded.completion_tokens,
-        total_tokens = usage_summary.total_tokens + excluded.total_tokens,
-        credits_used = usage_summary.credits_used + excluded.credits_used,
-        total_duration_ms = usage_summary.total_duration_ms + excluded.total_duration_ms
-    `);
+    call.upsertUsageSummary({
+      bucket: bucket.toISOString(),
+      provider: entry.provider || "unknown",
+      model: entry.model || "unknown",
+      apiKeyId: keyId,
+      apiKeyName: entry.apiKeyName || null,
+      totalRequests: BigInt(1),
+      successRequests: BigInt(entry.status === "success" ? 1 : 0),
+      errorRequests: BigInt(entry.status === "error" ? 1 : 0),
+      promptTokens: BigInt(entry.promptTokens || 0),
+      completionTokens: BigInt(entry.completionTokens || 0),
+      totalTokens: BigInt(entry.totalTokens || 0),
+      creditsUsed: entry.creditsUsed || 0,
+      totalDurationMs: BigInt(entry.durationMs || 0),
+    });
   } catch (err) {
     console.error("[Proxy] Failed to upsert usage_summary:", err);
   }
@@ -64,11 +82,10 @@ async function upsertUsageSummary(entry: {
 /** Prune request_logs to keep only the most recent MAX_REQUEST_LOGS rows */
 async function pruneRequestLogs() {
   try {
-    await db.run(sql`
-      DELETE FROM request_logs WHERE id NOT IN (
-        SELECT id FROM request_logs ORDER BY created_at DESC LIMIT ${MAX_REQUEST_LOGS}
-      )
-    `);
+    // Use bulkDeleteRequestLogs with a timestamp threshold
+    // Keep logs from the last hour as a reasonable window
+    const cutoff = BigInt(Date.now() - 3600_000);
+    call.bulkDeleteRequestLogs({ olderThanMs: cutoff });
   } catch (err) {
     console.error("[Proxy] Failed to prune request_logs:", err);
   }
@@ -79,7 +96,25 @@ let requestCounter = 0;
 
 export async function recordRequest(entry: NewRequestLog) {
   try {
-    await db.insert(requestLogs).values(entry);
+    call.insertRequestLog({
+      accountId: entry.accountId ? BigInt(entry.accountId) : null,
+      provider: entry.provider || "unknown",
+      model: entry.model || null,
+      promptTokens: BigInt(entry.promptTokens || 0),
+      completionTokens: BigInt(entry.completionTokens || 0),
+      totalTokens: BigInt(entry.totalTokens || 0),
+      creditsUsed: entry.creditsUsed || 0,
+      status: entry.status,
+      durationMs: entry.durationMs ? BigInt(entry.durationMs) : null,
+      errorMessage: entry.errorMessage || null,
+      requestBody: entry.requestBody || null,
+      responseBody: entry.responseBody || null,
+      accountEmail: entry.accountEmail || null,
+      accountQuotaBefore: entry.accountQuotaBefore || 0,
+      accountQuotaAfter: entry.accountQuotaAfter || 0,
+      apiKeyId: entry.apiKeyId ? BigInt(entry.apiKeyId) : null,
+      apiKeyName: entry.apiKeyName || null,
+    });
     void upsertUsageSummary({
       provider: entry.provider || "unknown",
       model: entry.model || "unknown",
@@ -230,7 +265,25 @@ function openAIErrorResponse(message: string, status: 400 | 503) {
 
 async function logProxyError(entry: NewRequestLog, label: string) {
   try {
-    await db.insert(requestLogs).values(entry);
+    call.insertRequestLog({
+      accountId: entry.accountId ? BigInt(entry.accountId) : null,
+      provider: entry.provider || "unknown",
+      model: entry.model || null,
+      promptTokens: BigInt(entry.promptTokens || 0),
+      completionTokens: BigInt(entry.completionTokens || 0),
+      totalTokens: BigInt(entry.totalTokens || 0),
+      creditsUsed: entry.creditsUsed || 0,
+      status: entry.status,
+      durationMs: entry.durationMs ? BigInt(entry.durationMs) : null,
+      errorMessage: entry.errorMessage || null,
+      requestBody: entry.requestBody || null,
+      responseBody: entry.responseBody || null,
+      accountEmail: entry.accountEmail || null,
+      accountQuotaBefore: entry.accountQuotaBefore || 0,
+      accountQuotaAfter: entry.accountQuotaAfter || 0,
+      apiKeyId: entry.apiKeyId ? BigInt(entry.apiKeyId) : null,
+      apiKeyName: entry.apiKeyName || null,
+    });
     // Also track errors in usage_summary
     void upsertUsageSummary({
       provider: entry.provider || "unknown", model: entry.model || "unknown", status: "error",
@@ -245,7 +298,7 @@ async function logProxyError(entry: NewRequestLog, label: string) {
 function wrapStreamWithUsageFinalizer(
   stream: ReadableStream<Uint8Array>,
   context: {
-    logId?: number;
+    logId?: bigint;
     accountId: number;
     accountEmail: string;
     provider: keyof typeof providers;
@@ -257,7 +310,7 @@ function wrapStreamWithUsageFinalizer(
     fallbackTotalTokens: number;
     fallbackCreditsUsed: number;
     fallbackCreditSource: CreditSource;
-    apiKeyId?: number | null;
+    apiKeyId?: number | bigint | null;
     apiKeyName?: string | null;
   }
 ): ReadableStream<Uint8Array> {
@@ -346,14 +399,17 @@ function wrapStreamWithUsageFinalizer(
           }
           // Still update request log with error status
           if (context.logId) {
-            await db
-              .update(requestLogs)
-              .set({
-                status: "error",
-                errorMessage: "Upstream rate limit or quota exceeded",
-                durationMs,
-              })
-              .where(eq(requestLogs.id, context.logId));
+            call.updateRequestLog({
+              id: context.logId,
+              promptTokens: BigInt(0),
+              completionTokens: BigInt(0),
+              totalTokens: BigInt(0),
+              creditsUsed: 0,
+              status: "error",
+              durationMs: BigInt(durationMs),
+              errorMessage: "Upstream rate limit or quota exceeded",
+              accountQuotaAfter: 0,
+            });
           }
           return;
         }
@@ -369,17 +425,17 @@ function wrapStreamWithUsageFinalizer(
         }
 
         if (context.logId) {
-          await db
-            .update(requestLogs)
-            .set({
-              promptTokens: finalPromptTokens,
-              completionTokens: finalCompletionTokens,
-              totalTokens: finalTotalTokens,
-              creditsUsed,
-              durationMs,
-              accountQuotaAfter: quotaAfter,
-            })
-            .where(eq(requestLogs.id, context.logId));
+          call.updateRequestLog({
+            id: context.logId,
+            promptTokens: BigInt(finalPromptTokens),
+            completionTokens: BigInt(finalCompletionTokens),
+            totalTokens: BigInt(finalTotalTokens),
+            creditsUsed,
+            status: "success",
+            durationMs: BigInt(durationMs),
+            errorMessage: null,
+            accountQuotaAfter: quotaAfter,
+          });
         }
 
         broadcast({
@@ -464,7 +520,7 @@ function wrapStreamWithUsageFinalizer(
 
 async function handleChatCompletion(body: ChatCompletionRequest, apiKey?: ResolvedApiKey) {
   // Rewrite the incoming model id to its mapped target (CLI integration, e.g.
-  // Claude Code's hardcoded haiku/sonnet/opus ids -> a model in the pool).
+  // the assistant's hardcoded haiku/sonnet/opus ids -> a model in the pool).
   body = { ...body, model: resolveModelAlias(normalizeModelId(body.model)) };
   const isStream = body.stream === true;
   const { result, account, provider, durationMs } = await routeRequest(body, isStream);
@@ -528,16 +584,38 @@ async function handleChatCompletion(body: ChatCompletionRequest, apiKey?: Resolv
   };
 
     if (isStream && result.stream) {
-      const [created] = await db.insert(requestLogs).values(logEntry).returning();
-      const createdAt = created?.createdAt?.toISOString?.() || new Date().toISOString();
+      // Generate a local ID for the log entry since insertRequestLog doesn't return one
+      const logId = BigInt(Date.now()) * BigInt(1000) + BigInt(Math.floor(Math.random() * 1000));
+
+      call.insertRequestLog({
+        accountId: logEntry.accountId ? BigInt(logEntry.accountId) : null,
+        provider: logEntry.provider || "unknown",
+        model: logEntry.model || null,
+        promptTokens: BigInt(logEntry.promptTokens || 0),
+        completionTokens: BigInt(logEntry.completionTokens || 0),
+        totalTokens: BigInt(logEntry.totalTokens || 0),
+        creditsUsed: logEntry.creditsUsed || 0,
+        status: logEntry.status,
+        durationMs: logEntry.durationMs ? BigInt(logEntry.durationMs) : null,
+        errorMessage: null,
+        requestBody: typeof logEntry.requestBody === "string" ? logEntry.requestBody : JSON.stringify(logEntry.requestBody) || null,
+        responseBody: typeof logEntry.responseBody === "string" ? logEntry.responseBody : JSON.stringify(logEntry.responseBody) || null,
+        accountEmail: logEntry.accountEmail || null,
+        accountQuotaBefore: logEntry.accountQuotaBefore || 0,
+        accountQuotaAfter: logEntry.accountQuotaAfter || 0,
+        apiKeyId: logEntry.apiKeyId ? BigInt(logEntry.apiKeyId) : null,
+        apiKeyName: logEntry.apiKeyName || null,
+      });
+
+      const createdAt = new Date().toISOString();
 
     broadcast({
       type: "request_started",
-      data: { ...logEntry, id: created?.id, email: account.email, createdAt },
+      data: { ...logEntry, id: logId, email: account.email, createdAt },
     });
 
     result.stream = wrapStreamWithUsageFinalizer(result.stream, {
-      logId: created?.id,
+      logId,
       accountId: account.id,
       accountEmail: account.email,
       provider,
@@ -557,7 +635,25 @@ async function handleChatCompletion(body: ChatCompletionRequest, apiKey?: Resolv
       return { result, isStream };
     }
 
-  await db.insert(requestLogs).values(logEntry);
+  call.insertRequestLog({
+    accountId: logEntry.accountId ? BigInt(logEntry.accountId) : null,
+    provider: logEntry.provider || "unknown",
+    model: logEntry.model || null,
+    promptTokens: BigInt(logEntry.promptTokens || 0),
+    completionTokens: BigInt(logEntry.completionTokens || 0),
+    totalTokens: BigInt(logEntry.totalTokens || 0),
+    creditsUsed: logEntry.creditsUsed || 0,
+    status: logEntry.status,
+    durationMs: logEntry.durationMs ? BigInt(logEntry.durationMs) : null,
+    errorMessage: null,
+    requestBody: typeof logEntry.requestBody === "string" ? logEntry.requestBody : JSON.stringify(logEntry.requestBody) || null,
+    responseBody: typeof logEntry.responseBody === "string" ? logEntry.responseBody : JSON.stringify(logEntry.responseBody) || null,
+    accountEmail: logEntry.accountEmail || null,
+    accountQuotaBefore: logEntry.accountQuotaBefore || 0,
+    accountQuotaAfter: logEntry.accountQuotaAfter || 0,
+    apiKeyId: logEntry.apiKeyId ? BigInt(logEntry.apiKeyId) : null,
+    apiKeyName: logEntry.apiKeyName || null,
+  });
 
   // Upsert to usage_summary + periodic prune
   void upsertUsageSummary({

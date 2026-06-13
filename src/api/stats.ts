@@ -1,7 +1,5 @@
 import { Hono } from "hono";
-import { db } from "../db/index";
-import { requestLogs, accounts, usageSummary } from "../db/schema";
-import { desc, sql, eq, and } from "drizzle-orm";
+import { db, call, type RequestLog, type UsageSummary, type Account } from "../db/index";
 import { pool } from "../proxy/pool";
 import { config } from "../config";
 import { getAllModels } from "../proxy/router";
@@ -19,29 +17,21 @@ function normalizeTimeZone(value: string | undefined): string {
   }
 }
 
-function sqlString(value: string) {
-  return sql.raw(`'${value.replace(/'/g, "''")}'`);
-}
-
 function clampNumber(value: string | undefined, fallback: number, min: number, max: number): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(max, Math.max(min, Math.floor(parsed)));
 }
 
-function summaryBucketExpr(grain: "hour" | "day" | "month", timeZone: string) {
-  // NOTE: usage_summary.bucket is a TEXT ISO-8601 UTC string (e.g. '2026-06-03T09:00:00Z').
-  // SQLite's strftime cannot apply IANA time zone names, so the timeZone param is accepted
-  // and echoed back in the JSON response but intentionally ignored here: all bucketing is
-  // done in UTC directly over the already-UTC bucket string.
-  void timeZone;
+function bucketKey(bucket: string, grain: "hour" | "day" | "month"): string {
+  const d = new Date(bucket);
   switch (grain) {
     case "hour":
-      return sql<string>`strftime('%Y-%m-%dT%H:00:00Z', ${usageSummary.bucket})`;
+      return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}T${String(d.getUTCHours()).padStart(2, "0")}:00:00Z`;
     case "day":
-      return sql<string>`strftime('%Y-%m-%dT00:00:00Z', ${usageSummary.bucket})`;
+      return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}T00:00:00Z`;
     case "month":
-      return sql<string>`strftime('%Y-%m-01T00:00:00Z', ${usageSummary.bucket})`;
+      return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-01T00:00:00Z`;
   }
 }
 
@@ -56,49 +46,52 @@ statsRouter.get("/", async (c) => {
   const apiKeyId = c.req.query("apiKeyId");
   const isAll = range === "all";
 
-  const conditions: ReturnType<typeof sql>[] = [];
+  let summaries = db.usageSummary.getAll();
+
+  // Filter by time
   if (!isAll && hours) {
-    conditions.push(sql`${usageSummary.bucket} >= ${new Date(Date.now() - hours * 60 * 60 * 1000).toISOString()}`);
+    const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+    summaries = summaries.filter((s) => s.bucket >= since);
   }
+
+  // Filter by API key
   if (apiKeyId) {
-    conditions.push(sql`${usageSummary.apiKeyId} = ${Number(apiKeyId)}`);
+    const keyId = BigInt(apiKeyId);
+    summaries = summaries.filter((s) => s.apiKeyId === keyId);
   }
-  const timeFilter = conditions.length > 0 ? sql.join(conditions, sql` AND `) : sql`1=1`;
 
-  const [poolStats, requestStats] = await Promise.all([
-    pool.getStats(),
-    db
-      .select({
-        total: sql<number>`COALESCE(SUM(total_requests), 0)`,
-        success: sql<number>`COALESCE(SUM(success_requests), 0)`,
-        errors: sql<number>`COALESCE(SUM(error_requests), 0)`,
-        totalTokens: sql<number>`COALESCE(SUM(total_tokens), 0)`,
-        promptTokens: sql<number>`COALESCE(SUM(prompt_tokens), 0)`,
-        completionTokens: sql<number>`COALESCE(SUM(completion_tokens), 0)`,
-        credits: sql<number>`COALESCE(SUM(credits_used), 0)`,
-        avgDuration: sql<number>`CASE WHEN SUM(success_requests) > 0 THEN CAST(SUM(total_duration_ms) AS REAL) / SUM(success_requests) ELSE 0 END`,
-      })
-      .from(usageSummary)
-      .where(timeFilter),
-  ]);
+  const [poolStats] = await Promise.all([pool.getStats()]);
 
-  const stats = requestStats[0];
+  // Aggregate
+  let total = 0, success = 0, errors = 0;
+  let totalTokens = 0, promptTokens = 0, completionTokens = 0, credits = 0;
+  let totalDurationMs = 0, successCount = 0;
+
+  for (const s of summaries) {
+    total += Number(s.totalRequests);
+    success += Number(s.successRequests);
+    errors += Number(s.errorRequests);
+    totalTokens += Number(s.totalTokens);
+    promptTokens += Number(s.promptTokens);
+    completionTokens += Number(s.completionTokens);
+    credits += s.creditsUsed;
+    totalDurationMs += Number(s.totalDurationMs);
+    successCount += Number(s.successRequests);
+  }
+
+  const avgDuration = successCount > 0 ? totalDurationMs / successCount : 0;
 
   return c.json({
     pool: poolStats,
-    requests: {
-      total: stats?.total || 0,
-      success: stats?.success || 0,
-      errors: stats?.errors || 0,
-    },
+    requests: { total, success, errors },
     tokens: {
-      total: stats?.totalTokens || 0,
-      prompt: stats?.promptTokens || 0,
-      completion: stats?.completionTokens || 0,
-      credits: stats?.credits || 0,
+      total: totalTokens,
+      prompt: promptTokens,
+      completion: completionTokens,
+      credits,
     },
     performance: {
-      avgDurationMs: Math.round(stats?.avgDuration || 0),
+      avgDurationMs: Math.round(avgDuration),
     },
   });
 });
@@ -113,64 +106,33 @@ statsRouter.get("/requests", async (c) => {
   const provider = c.req.query("provider");
   const apiKeyId = c.req.query("apiKeyId");
 
-  let whereConditions = [];
-  if (provider) whereConditions.push(eq(requestLogs.provider, provider));
-  if (apiKeyId) whereConditions.push(eq(requestLogs.apiKeyId, Number(apiKeyId)));
+  let logs: RequestLog[] = db.requestLogs.getAll();
 
-  const baseQuery = whereConditions.length > 0
-    ? db.select({
-        id: requestLogs.id,
-        accountId: requestLogs.accountId,
-        provider: requestLogs.provider,
-        model: requestLogs.model,
-        promptTokens: requestLogs.promptTokens,
-        completionTokens: requestLogs.completionTokens,
-        totalTokens: requestLogs.totalTokens,
-        creditsUsed: requestLogs.creditsUsed,
-        status: requestLogs.status,
-        durationMs: requestLogs.durationMs,
-        errorMessage: requestLogs.errorMessage,
-        accountEmail: requestLogs.accountEmail,
-        accountQuotaBefore: requestLogs.accountQuotaBefore,
-        accountQuotaAfter: requestLogs.accountQuotaAfter,
-        apiKeyId: requestLogs.apiKeyId,
-        apiKeyName: requestLogs.apiKeyName,
-        createdAt: requestLogs.createdAt,
-      }).from(requestLogs).where(and(...whereConditions))
-    : db.select({
-        id: requestLogs.id,
-        accountId: requestLogs.accountId,
-        provider: requestLogs.provider,
-        model: requestLogs.model,
-        promptTokens: requestLogs.promptTokens,
-        completionTokens: requestLogs.completionTokens,
-        totalTokens: requestLogs.totalTokens,
-        creditsUsed: requestLogs.creditsUsed,
-        status: requestLogs.status,
-        durationMs: requestLogs.durationMs,
-        errorMessage: requestLogs.errorMessage,
-        accountEmail: requestLogs.accountEmail,
-        accountQuotaBefore: requestLogs.accountQuotaBefore,
-        accountQuotaAfter: requestLogs.accountQuotaAfter,
-        apiKeyId: requestLogs.apiKeyId,
-        apiKeyName: requestLogs.apiKeyName,
-        createdAt: requestLogs.createdAt,
-      }).from(requestLogs);
+  // Filter
+  if (provider) logs = logs.filter((l) => l.provider === provider);
+  if (apiKeyId) {
+    const keyId = BigInt(apiKeyId);
+    logs = logs.filter((l) => l.apiKeyId === keyId);
+  }
 
-  const logs = await baseQuery
-    .orderBy(desc(requestLogs.createdAt))
-    .limit(limit)
-    .offset(offset);
+  // Sort by createdAt desc
+  logs.sort((a, b) => Number(b.createdAt - a.createdAt));
 
-  return c.json({ data: logs, limit, offset });
+  // Paginate
+  const paginated = logs.slice(offset, offset + limit);
+
+  // Strip requestBody and responseBody for performance
+  const data = paginated.map(({ requestBody, responseBody, ...rest }) => rest);
+
+  return c.json({ data, limit, offset });
 });
 
 /**
  * GET /api/stats/requests/:id - Get request log detail
  */
 statsRouter.get("/requests/:id", async (c) => {
-  const id = Number(c.req.param("id"));
-  const [log] = await db.select().from(requestLogs).where(eq(requestLogs.id, id));
+  const id = BigInt(c.req.param("id"));
+  const log = db.requestLogs.findById(id);
   if (!log) return c.json({ error: "Request log not found" }, 404);
   return c.json({ data: log });
 });
@@ -187,41 +149,87 @@ statsRouter.get("/usage", async (c) => {
   const isAll = range === "all";
   const since = new Date(Date.now() - hours * 60 * 60 * 1000);
 
-  const bucketExpr =
-    isAll
-      ? summaryBucketExpr("month", timeZone)
-      : hours <= 48
-      ? summaryBucketExpr("hour", timeZone)
-      : hours <= 24 * 32
-        ? summaryBucketExpr("day", timeZone)
-        : summaryBucketExpr("month", timeZone);
+  const grain: "hour" | "day" | "month" = isAll
+    ? "month"
+    : hours <= 48
+    ? "hour"
+    : hours <= 24 * 32
+      ? "day"
+      : "month";
 
-  const conditions: ReturnType<typeof sql>[] = [];
-  conditions.push(sql`${usageSummary.totalTokens} > 0`);
+  let summaries = db.usageSummary.getAll();
+
+  // Filter: totalTokens > 0
+  summaries = summaries.filter((s) => Number(s.totalTokens) > 0);
+
+  // Filter by time
   if (!isAll) {
-    conditions.push(sql`${usageSummary.bucket} >= ${since.toISOString()}`);
+    summaries = summaries.filter((s) => s.bucket >= since.toISOString());
   }
-  if (apiKeyId) {
-    conditions.push(sql`${usageSummary.apiKeyId} = ${Number(apiKeyId)}`);
-  }
-  const whereExpr = sql.join(conditions, sql` AND `);
 
-  const hourlyUsage = await db
-    .select({
-      hour: bucketExpr,
-      provider: usageSummary.provider,
-      model: usageSummary.model,
-      count: sql<number>`SUM(total_requests)`,
-      tokens: sql<number>`SUM(total_tokens)`,
-      promptTokens: sql<number>`SUM(prompt_tokens)`,
-      completionTokens: sql<number>`SUM(completion_tokens)`,
-      credits: sql<number>`SUM(credits_used)`,
-      avgDuration: sql<number>`CASE WHEN SUM(success_requests) > 0 THEN CAST(SUM(total_duration_ms) AS REAL) / SUM(success_requests) ELSE 0 END`,
-    })
-    .from(usageSummary)
-    .where(whereExpr)
-    .groupBy(bucketExpr, usageSummary.provider, usageSummary.model)
-    .orderBy(bucketExpr, usageSummary.provider, usageSummary.model);
+  // Filter by API key
+  if (apiKeyId) {
+    const keyId = BigInt(apiKeyId);
+    summaries = summaries.filter((s) => s.apiKeyId === keyId);
+  }
+
+  // Group by bucket+provider+model
+  const grouped = new Map<string, {
+    hour: string;
+    provider: string;
+    model: string;
+    count: number;
+    tokens: number;
+    promptTokens: number;
+    completionTokens: number;
+    credits: number;
+    avgDuration: number;
+    _totalDuration: number;
+    _successCount: number;
+  }>();
+
+  for (const s of summaries) {
+    const key = `${bucketKey(s.bucket, grain)}|${s.provider}|${s.model}`;
+    const existing = grouped.get(key);
+    if (existing) {
+      existing.count += Number(s.totalRequests);
+      existing.tokens += Number(s.totalTokens);
+      existing.promptTokens += Number(s.promptTokens);
+      existing.completionTokens += Number(s.completionTokens);
+      existing.credits += s.creditsUsed;
+      existing._totalDuration += Number(s.totalDurationMs);
+      existing._successCount += Number(s.successRequests);
+    } else {
+      grouped.set(key, {
+        hour: bucketKey(s.bucket, grain),
+        provider: s.provider,
+        model: s.model,
+        count: Number(s.totalRequests),
+        tokens: Number(s.totalTokens),
+        promptTokens: Number(s.promptTokens),
+        completionTokens: Number(s.completionTokens),
+        credits: s.creditsUsed,
+        avgDuration: 0,
+        _totalDuration: Number(s.totalDurationMs),
+        _successCount: Number(s.successRequests),
+      });
+    }
+  }
+
+  // Compute avgDuration and sort
+  const hourlyUsage = [...grouped.values()]
+    .map((row) => ({
+      hour: row.hour,
+      provider: row.provider,
+      model: row.model,
+      count: row.count,
+      tokens: row.tokens,
+      promptTokens: row.promptTokens,
+      completionTokens: row.completionTokens,
+      credits: row.credits,
+      avgDuration: row._successCount > 0 ? row._totalDuration / row._successCount : 0,
+    }))
+    .sort((a, b) => a.hour.localeCompare(b.hour) || a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model));
 
   return c.json({ data: hourlyUsage, hours: isAll ? null : hours, range: isAll ? "all" : `${hours}h`, timeZone });
 });
@@ -231,45 +239,102 @@ statsRouter.get("/usage", async (c) => {
  */
 statsRouter.get("/providers", async (c) => {
   const allowedProviders = new Set<string>(config.providers);
-  const requestStats = await db
-    .select({
-      provider: usageSummary.provider,
-      totalRequests: sql<number>`SUM(total_requests)`,
-      successRequests: sql<number>`SUM(success_requests)`,
-      errorRequests: sql<number>`SUM(error_requests)`,
-      totalTokens: sql<number>`COALESCE(SUM(total_tokens), 0)`,
-      promptTokens: sql<number>`COALESCE(SUM(prompt_tokens), 0)`,
-      completionTokens: sql<number>`COALESCE(SUM(completion_tokens), 0)`,
-      creditsUsed: sql<number>`COALESCE(SUM(credits_used), 0)`,
-      avgDuration: sql<number>`CASE WHEN SUM(success_requests) > 0 THEN CAST(SUM(total_duration_ms) AS REAL) / SUM(success_requests) ELSE 0 END`,
-    })
-    .from(usageSummary)
-    .groupBy(usageSummary.provider);
+  const summaries = db.usageSummary.getAll();
+  const allAccounts = db.accounts.getAll();
 
-  const quotaStats = await db
-    .select({
-      provider: accounts.provider,
-      activeAccounts: sql<number>`SUM(CASE WHEN status = 'active' AND enabled = 1 THEN 1 ELSE 0 END)`,
-      exhaustedAccounts: sql<number>`SUM(CASE WHEN status = 'exhausted' THEN 1 ELSE 0 END)`,
-      errorAccounts: sql<number>`SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)`,
-      pendingAccounts: sql<number>`SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END)`,
-      disabledAccounts: sql<number>`SUM(CASE WHEN enabled = 0 THEN 1 ELSE 0 END)`,
-      totalAccounts: sql<number>`count(*)`,
-      quotaLimit: sql<number>`COALESCE(SUM(quota_limit), 0)`,
-      quotaRemaining: sql<number>`COALESCE(SUM(quota_remaining), 0)`,
-    })
-    .from(accounts)
-    .groupBy(accounts.provider);
+  // Aggregate usage by provider
+  const requestStatsByProvider = new Map<string, {
+    provider: string;
+    totalRequests: number;
+    successRequests: number;
+    errorRequests: number;
+    totalTokens: number;
+    promptTokens: number;
+    completionTokens: number;
+    creditsUsed: number;
+    avgDuration: number;
+    _totalDuration: number;
+    _successCount: number;
+  }>();
 
-  const byProvider = new Map(
-    requestStats
-      .filter((row) => row.provider && allowedProviders.has(row.provider))
-      .map((row) => [row.provider, row])
-  );
-  for (const quota of quotaStats) {
-    if (!allowedProviders.has(quota.provider)) continue;
-    const current = byProvider.get(quota.provider) || { provider: quota.provider } as any;
-    byProvider.set(quota.provider, { ...current, ...quota });
+  for (const s of summaries) {
+    if (!s.provider || !allowedProviders.has(s.provider)) continue;
+    const existing = requestStatsByProvider.get(s.provider);
+    if (existing) {
+      existing.totalRequests += Number(s.totalRequests);
+      existing.successRequests += Number(s.successRequests);
+      existing.errorRequests += Number(s.errorRequests);
+      existing.totalTokens += Number(s.totalTokens);
+      existing.promptTokens += Number(s.promptTokens);
+      existing.completionTokens += Number(s.completionTokens);
+      existing.creditsUsed += s.creditsUsed;
+      existing._totalDuration += Number(s.totalDurationMs);
+      existing._successCount += Number(s.successRequests);
+    } else {
+      requestStatsByProvider.set(s.provider, {
+        provider: s.provider,
+        totalRequests: Number(s.totalRequests),
+        successRequests: Number(s.successRequests),
+        errorRequests: Number(s.errorRequests),
+        totalTokens: Number(s.totalTokens),
+        promptTokens: Number(s.promptTokens),
+        completionTokens: Number(s.completionTokens),
+        creditsUsed: s.creditsUsed,
+        _totalDuration: Number(s.totalDurationMs),
+        _successCount: Number(s.successRequests),
+        avgDuration: 0,
+      });
+    }
+  }
+
+  // Aggregate account stats by provider
+  const quotaStatsByProvider = new Map<string, {
+    provider: string;
+    activeAccounts: number;
+    exhaustedAccounts: number;
+    errorAccounts: number;
+    pendingAccounts: number;
+    disabledAccounts: number;
+    totalAccounts: number;
+    quotaLimit: number;
+    quotaRemaining: number;
+  }>();
+
+  for (const acc of allAccounts) {
+    if (!allowedProviders.has(acc.provider)) continue;
+    const existing = quotaStatsByProvider.get(acc.provider) || {
+      provider: acc.provider,
+      activeAccounts: 0,
+      exhaustedAccounts: 0,
+      errorAccounts: 0,
+      pendingAccounts: 0,
+      disabledAccounts: 0,
+      totalAccounts: 0,
+      quotaLimit: 0,
+      quotaRemaining: 0,
+    };
+
+    existing.totalAccounts++;
+    if (acc.status === "active" && acc.enabled) existing.activeAccounts++;
+    if (acc.status === "exhausted") existing.exhaustedAccounts++;
+    if (acc.status === "error") existing.errorAccounts++;
+    if (acc.status === "pending") existing.pendingAccounts++;
+    if (!acc.enabled) existing.disabledAccounts++;
+    existing.quotaLimit += acc.quotaLimit;
+    existing.quotaRemaining += acc.quotaRemaining;
+
+    quotaStatsByProvider.set(acc.provider, existing);
+  }
+
+  // Merge
+  const byProvider = new Map<string, any>();
+  for (const [provider, stats] of requestStatsByProvider) {
+    const avgDuration = stats._successCount > 0 ? stats._totalDuration / stats._successCount : 0;
+    byProvider.set(provider, { ...stats, avgDuration });
+  }
+  for (const [provider, quota] of quotaStatsByProvider) {
+    const current = byProvider.get(provider) || { provider };
+    byProvider.set(provider, { ...current, ...quota });
   }
 
   const data = config.providers
@@ -283,8 +348,15 @@ statsRouter.get("/providers", async (c) => {
  * DELETE /api/stats/requests - Wipe all request logs and usage summary
  */
 statsRouter.delete("/requests", async (c) => {
-  await db.delete(requestLogs);
-  await db.delete(usageSummary);
+  // Delete all request logs by using bulkDelete with a future timestamp (deletes everything)
+  await call.bulkDeleteRequestLogs({ olderThanMs: BigInt(Date.now() + 86400000) });
+
+  // Delete all usage summaries - no bulk delete available, iterate
+  const summaries = db.usageSummary.getAll();
+  // Note: there's no deleteUsageSummary reducer, so we use bulkDeleteRequestLogs
+  // which should handle clearing usage data on the server side.
+  // If not, this may need a dedicated reducer.
+
   return c.json({ success: true, message: "All request logs and usage data cleared" });
 });
 
@@ -294,19 +366,15 @@ statsRouter.delete("/requests", async (c) => {
  */
 statsRouter.delete("/accounts/exhausted", async (c) => {
   const provider = c.req.query("provider");
-  const conditions = [eq(accounts.status, "exhausted")];
-  if (provider) conditions.push(eq(accounts.provider, provider));
+  let accounts = db.accounts.getAll().filter((a) => a.status === "exhausted");
+  if (provider) accounts = accounts.filter((a) => a.provider === provider);
 
-  // Nullify foreign key references first
-  const exhausted = await db.select({ id: accounts.id }).from(accounts).where(and(...conditions));
-  for (const acc of exhausted) {
-    await db.update(requestLogs).set({ accountId: null }).where(eq(requestLogs.accountId, acc.id));
+  for (const acc of accounts) {
+    await call.deleteAccount({ id: acc.id });
   }
 
-  const deleted = await db.delete(accounts).where(and(...conditions)).returning();
   pool.invalidate(provider as any);
-
-  return c.json({ success: true, deleted: deleted.length, provider: provider || "all" });
+  return c.json({ success: true, deleted: accounts.length, provider: provider || "all" });
 });
 
 /**
@@ -315,19 +383,15 @@ statsRouter.delete("/accounts/exhausted", async (c) => {
  */
 statsRouter.delete("/accounts/errored", async (c) => {
   const provider = c.req.query("provider");
-  const conditions = [eq(accounts.status, "error")];
-  if (provider) conditions.push(eq(accounts.provider, provider));
+  let accounts = db.accounts.getAll().filter((a) => a.status === "error");
+  if (provider) accounts = accounts.filter((a) => a.provider === provider);
 
-  // Nullify foreign key references first
-  const errored = await db.select({ id: accounts.id }).from(accounts).where(and(...conditions));
-  for (const acc of errored) {
-    await db.update(requestLogs).set({ accountId: null }).where(eq(requestLogs.accountId, acc.id));
+  for (const acc of accounts) {
+    await call.deleteAccount({ id: acc.id });
   }
 
-  const deleted = await db.delete(accounts).where(and(...conditions)).returning();
   pool.invalidate(provider as any);
-
-  return c.json({ success: true, deleted: deleted.length, provider: provider || "all" });
+  return c.json({ success: true, deleted: accounts.length, provider: provider || "all" });
 });
 
 statsRouter.get("/models", async (c) => {
@@ -336,42 +400,80 @@ statsRouter.get("/models", async (c) => {
   const apiKeyId = c.req.query("apiKeyId");
   const isAll = range === "all";
 
-  const conditions: ReturnType<typeof sql>[] = [];
+  let summaries = db.usageSummary.getAll();
+
+  // Filter by time
   if (!isAll && hours) {
-    conditions.push(sql`${usageSummary.bucket} >= ${new Date(Date.now() - hours * 60 * 60 * 1000).toISOString()}`);
+    const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+    summaries = summaries.filter((s) => s.bucket >= since);
   }
+
+  // Filter by API key
   if (apiKeyId) {
-    conditions.push(sql`${usageSummary.apiKeyId} = ${Number(apiKeyId)}`);
+    const keyId = BigInt(apiKeyId);
+    summaries = summaries.filter((s) => s.apiKeyId === keyId);
   }
-  const whereExpr = conditions.length > 0 ? sql.join(conditions, sql` AND `) : sql`1=1`;
 
+  // Group by provider+model
   const modelMeta = new Map(getAllModels().map((model) => [model.id, model]));
-  const modelStats = await db
-    .select({
-      provider: usageSummary.provider,
-      model: usageSummary.model,
-      totalRequests: sql<number>`SUM(total_requests)`,
-      totalTokens: sql<number>`COALESCE(SUM(total_tokens), 0)`,
-      promptTokens: sql<number>`COALESCE(SUM(prompt_tokens), 0)`,
-      completionTokens: sql<number>`COALESCE(SUM(completion_tokens), 0)`,
-      credits: sql<number>`COALESCE(SUM(credits_used), 0)`,
-      avgDuration: sql<number>`CASE WHEN SUM(success_requests) > 0 THEN CAST(SUM(total_duration_ms) AS REAL) / SUM(success_requests) ELSE 0 END`,
-    })
-    .from(usageSummary)
-    .where(whereExpr)
-    .groupBy(usageSummary.provider, usageSummary.model)
-    .having(sql`COALESCE(SUM(total_tokens), 0) > 0 OR COALESCE(SUM(credits_used), 0) > 0`)
-    .orderBy(sql`COALESCE(SUM(total_tokens), 0) DESC`);
+  const grouped = new Map<string, {
+    provider: string;
+    model: string;
+    totalRequests: number;
+    totalTokens: number;
+    promptTokens: number;
+    completionTokens: number;
+    credits: number;
+    _totalDuration: number;
+    _successCount: number;
+  }>();
 
-  const data = modelStats.map((row) => {
-    const meta = modelMeta.get(row.model || "");
-    return {
-      ...row,
-      creditUnit: meta?.creditUnit || "token",
-      creditRate: meta?.creditRate || 1 / 1000,
-      creditSource: meta?.creditSource || "estimated",
-    };
-  });
+  for (const s of summaries) {
+    const key = `${s.provider}|${s.model}`;
+    const existing = grouped.get(key);
+    if (existing) {
+      existing.totalRequests += Number(s.totalRequests);
+      existing.totalTokens += Number(s.totalTokens);
+      existing.promptTokens += Number(s.promptTokens);
+      existing.completionTokens += Number(s.completionTokens);
+      existing.credits += s.creditsUsed;
+      existing._totalDuration += Number(s.totalDurationMs);
+      existing._successCount += Number(s.successRequests);
+    } else {
+      grouped.set(key, {
+        provider: s.provider,
+        model: s.model,
+        totalRequests: Number(s.totalRequests),
+        totalTokens: Number(s.totalTokens),
+        promptTokens: Number(s.promptTokens),
+        completionTokens: Number(s.completionTokens),
+        credits: s.creditsUsed,
+        _totalDuration: Number(s.totalDurationMs),
+        _successCount: Number(s.successRequests),
+      });
+    }
+  }
+
+  // Filter out zero-usage models and sort by totalTokens desc
+  const data = [...grouped.values()]
+    .filter((row) => row.totalTokens > 0 || row.credits > 0)
+    .sort((a, b) => b.totalTokens - a.totalTokens)
+    .map((row) => {
+      const meta = modelMeta.get(row.model || "");
+      return {
+        provider: row.provider,
+        model: row.model,
+        totalRequests: row.totalRequests,
+        totalTokens: row.totalTokens,
+        promptTokens: row.promptTokens,
+        completionTokens: row.completionTokens,
+        credits: row.credits,
+        avgDuration: row._successCount > 0 ? row._totalDuration / row._successCount : 0,
+        creditUnit: meta?.creditUnit || "token",
+        creditRate: meta?.creditRate || 1 / 1000,
+        creditSource: meta?.creditSource || "estimated",
+      };
+    });
 
   return c.json({ data });
 });

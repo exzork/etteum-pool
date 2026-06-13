@@ -1,9 +1,7 @@
-import { db } from "../db/index";
-import { proxyPool, settings } from "../db/schema";
-import { eq, sql, inArray } from "drizzle-orm";
+import { db, call, type ProxyPoolEntry } from "../db/index";
 
 interface CachedProxy {
-  id: number;
+  id: bigint;
   url: string;
   type: string;
 }
@@ -19,12 +17,8 @@ async function refreshCache(): Promise<CachedProxy[]> {
     return cachedProxies;
   }
 
-  const rows = await db
-    .select({ id: proxyPool.id, url: proxyPool.url, type: proxyPool.type })
-    .from(proxyPool)
-    .where(eq(proxyPool.status, "active"));
-
-  cachedProxies = rows;
+  const rows = db.proxyPool.getActive();
+  cachedProxies = rows.map((r) => ({ id: r.id, url: r.url, type: r.proxyType }));
   cacheTimestamp = now;
   return cachedProxies;
 }
@@ -50,21 +44,17 @@ async function getProxyPoolSettings(): Promise<ProxyPoolSettings> {
   const now = Date.now();
   if (now - settingsCacheTs < SETTINGS_CACHE_TTL_MS) return settingsCache;
 
-  const rows = await db
-    .select({ key: settings.key, value: settings.value })
-    .from(settings)
-    .where(inArray(settings.key, ["proxy_pool_usage", "proxy_pool_rotation"]));
+  const usageVal = db.settings.get("proxy_pool_usage");
+  const rotationVal = db.settings.get("proxy_pool_rotation");
 
   let usage: ProxyUsage = "all";
   let rotation: ProxyRotation = "round_robin";
 
-  for (const row of rows) {
-    if (row.key === "proxy_pool_usage" && (row.value === "all" || row.value === "model" || row.value === "auth")) {
-      usage = row.value;
-    }
-    if (row.key === "proxy_pool_rotation" && (row.value === "round_robin" || row.value === "sequential")) {
-      rotation = row.value;
-    }
+  if (usageVal === "all" || usageVal === "model" || usageVal === "auth") {
+    usage = usageVal;
+  }
+  if (rotationVal === "round_robin" || rotationVal === "sequential") {
+    rotation = rotationVal;
   }
 
   settingsCache = { usage, rotation };
@@ -92,7 +82,7 @@ let sequentialIndex = 0;
 export async function getNextProxy(
   purpose: "model" | "auth" = "model",
   type?: "http" | "socks5",
-): Promise<{ id: number; url: string } | null> {
+): Promise<{ id: bigint; url: string } | null> {
   const cfg = await getProxyPoolSettings();
 
   // Check if proxy pool is enabled for this purpose
@@ -117,11 +107,17 @@ export async function getNextProxy(
 
   if (!proxy) return null;
 
-  // Update lastUsedAt in background
-  void db
-    .update(proxyPool)
-    .set({ lastUsedAt: new Date() })
-    .where(eq(proxyPool.id, proxy.id));
+  // Update lastUsedAt in background via reducer
+  void call.updateProxyStats({
+    id: proxy.id,
+    successCount: BigInt(0),
+    failCount: BigInt(0),
+    lastUsedAt: BigInt(Date.now()),
+    lastCheckedAt: null,
+    latencyMs: null,
+    status: "active",
+    errorMessage: null,
+  });
 
   return { id: proxy.id, url: proxy.url };
 }
@@ -135,22 +131,39 @@ export function advanceSequentialIndex() {
 }
 
 // ── Success / Fail tracking ─────────────────────────────────────────
-export async function markProxySuccess(id: number) {
-  await db
-    .update(proxyPool)
-    .set({ successCount: sql`${proxyPool.successCount} + 1`, updatedAt: new Date() })
-    .where(eq(proxyPool.id, id));
+export async function markProxySuccess(id: bigint) {
+  // Read current stats from cache to increment
+  const all = db.proxyPool.getAll();
+  const entry = all.find((p) => p.id === id);
+  const currentSuccess = entry?.successCount ?? BigInt(0);
+
+  await call.updateProxyStats({
+    id,
+    successCount: currentSuccess + BigInt(1),
+    failCount: entry?.failCount ?? BigInt(0),
+    lastUsedAt: BigInt(Date.now()),
+    lastCheckedAt: null,
+    latencyMs: null,
+    status: "active",
+    errorMessage: null,
+  });
 }
 
-export async function markProxyFail(id: number, error?: string) {
-  await db
-    .update(proxyPool)
-    .set({
-      failCount: sql`${proxyPool.failCount} + 1`,
-      errorMessage: error || null,
-      updatedAt: new Date(),
-    })
-    .where(eq(proxyPool.id, id));
+export async function markProxyFail(id: bigint, error?: string) {
+  const all = db.proxyPool.getAll();
+  const entry = all.find((p) => p.id === id);
+  const currentFail = entry?.failCount ?? BigInt(0);
+
+  await call.updateProxyStats({
+    id,
+    successCount: entry?.successCount ?? BigInt(0),
+    failCount: currentFail + BigInt(1),
+    lastUsedAt: null,
+    lastCheckedAt: null,
+    latencyMs: null,
+    status: "active",
+    errorMessage: error || null,
+  });
 
   // In sequential mode, advance to next proxy on failure
   advanceSequentialIndex();

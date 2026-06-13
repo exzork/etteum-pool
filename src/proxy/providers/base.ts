@@ -1,4 +1,4 @@
-import type { Account } from "../../db/schema";
+import type { Account } from "../../db/index";
 import { config } from "../../config";
 
 export interface ChatMessage {

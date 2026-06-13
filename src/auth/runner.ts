@@ -1,10 +1,7 @@
 import { config } from "../config";
-import { db } from "../db/index";
-import { accounts, settings } from "../db/schema";
-import { eq } from "drizzle-orm";
+import { db, call, type Account } from "../db/index";
 import { decrypt } from "../utils/crypto";
 import { broadcast } from "../ws/index";
-import type { Account } from "../db/schema";
 import { addAuthLog } from "./logs";
 import { providers } from "../proxy/router";
 import { getVccPoolFromDb, handleCardResult } from "../api/vcc";
@@ -238,7 +235,7 @@ async function waitForProcessExit(proc: ReturnType<typeof Bun.spawn>, timeoutMs 
             resolve(-1);
           }
         }, 200);
-        // Cleanup interval when process exits naturally
+        // Cleanup interval when process exits natural
         proc.exited.then(() => clearInterval(interval)).catch(() => clearInterval(interval));
       })
     : null;
@@ -260,9 +257,10 @@ async function waitForProcessExit(proc: ReturnType<typeof Bun.spawn>, timeoutMs 
 }
 
 function emitProgressLog(account: Account, event: ScriptProgressEvent) {
+  const accountId = Number(account.id);
   const log = addAuthLog({
     type: "login_progress",
-    accountId: account.id,
+    accountId,
     email: account.email,
     provider: event.provider,
     step: event.step,
@@ -273,8 +271,8 @@ function emitProgressLog(account: Account, event: ScriptProgressEvent) {
     type: "login_progress",
     data: {
       logId: log.id,
-      id: account.id,
-      accountId: account.id,
+      id: accountId,
+      accountId,
       email: account.email,
       provider: event.provider,
       step: event.step,
@@ -303,8 +301,8 @@ async function getKiroProUpgradeEnv(accountId: number): Promise<Record<string, s
   let billingAddress = config.billingAddress;
 
   if (!upgradeEnabled) {
-    const [upgradeSetting] = await db.select().from(settings).where(eq(settings.key, "kiro_pro_upgrade"));
-    if (upgradeSetting?.value === "true") upgradeEnabled = true;
+    const upgradeValue = db.settings.get("kiro_pro_upgrade");
+    if (upgradeValue === "true") upgradeEnabled = true;
   }
 
   if (!upgradeEnabled) return {};
@@ -312,9 +310,11 @@ async function getKiroProUpgradeEnv(accountId: number): Promise<Record<string, s
   // Read billing address from DB settings if not set via env
   if (!process.env.BILLING_ADDRESS) {
     const keys = ["billing_name", "billing_country", "billing_line1", "billing_city", "billing_state", "billing_postal_code"];
-    const rows = await db.select().from(settings);
+    const allSettings = db.settings.getAll();
     const map: Record<string, string> = {};
-    for (const r of rows) if (keys.includes(r.key) && r.value) map[r.key] = r.value;
+    for (const r of allSettings) {
+      if (keys.includes(r.key) && r.value) map[r.key] = r.value;
+    }
 
     if (Object.keys(map).length > 0) {
       billingAddress = {
@@ -355,6 +355,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
   const provider = account.provider; // kiro | codebuddy | canva | gitlab-duo | ...
   const headless = options.headless ?? config.headless;
   const streamedEvents: ScriptEvent[] = [];
+  const accountId = Number(account.id);
 
   // GitLab Duo: auto-register removed — use manual PAT entry via API
   if (provider === "gitlab-duo") {
@@ -364,7 +365,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
   try {
     const startLog = addAuthLog({
       type: "login_progress",
-      accountId: account.id,
+      accountId,
       email: account.email,
       provider,
       step: "starting",
@@ -374,7 +375,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
       type: "login_progress",
       data: {
         logId: startLog.id,
-        id: account.id,
+        id: accountId,
         email: account.email,
         provider,
         step: "starting",
@@ -383,7 +384,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
     });
 
     const kiroProEnv = provider === "kiro-pro"
-      ? { BATCHER_BROWSER_ENGINE: options.browserEngine || config.browserEngine, ...(await getKiroProUpgradeEnv(account.id)) }
+      ? { BATCHER_BROWSER_ENGINE: options.browserEngine || config.browserEngine, ...(await getKiroProUpgradeEnv(accountId)) }
       : {};
 
     const proxyUrlForAuth = (await getNextProxy("auth"))?.url || "";
@@ -420,7 +421,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
       }
     );
 
-    activeProcesses.set(account.id, proc);
+    activeProcesses.set(accountId, proc);
 
     const stdoutPromise = readTextStream(proc.stdout, (line) => {
       const event = parseScriptLine(line);
@@ -435,12 +436,12 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
         const cardStatus = (event as any).card_status;
         if (cardLast4 && cardStatus && cardStatus !== "success") {
           const status = cardStatus === "declined" ? "declined" as const : "error" as const;
-          void handleCardResult(account.id, cardLast4, status);
+          void handleCardResult(accountId, cardLast4, status);
         }
       } else if (event.type === "error") {
         const log = addAuthLog({
           type: "login_failed",
-          accountId: account.id,
+          accountId,
           email: account.email,
           provider: event.provider || provider,
           error: event.error,
@@ -448,7 +449,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
         });
         broadcast({
           type: "login_failed",
-          data: { logId: log.id, id: account.id, accountId: account.id, email: account.email, provider: event.provider || provider, error: event.error, timestamp: log.timestamp },
+          data: { logId: log.id, id: accountId, accountId, email: account.email, provider: event.provider || provider, error: event.error, timestamp: log.timestamp },
         });
       }
     });
@@ -456,7 +457,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
     const timeoutMs = (provider === "kiro-pro" && config.kiroProUpgrade)
       ? Math.max(config.authProcessTimeoutMs, 15 * 60 * 1000)
       : config.authProcessTimeoutMs;
-    const exitCode = await waitForProcessExit(proc, timeoutMs, account.id);
+    const exitCode = await waitForProcessExit(proc, timeoutMs, accountId);
     const [stdoutResult, stderrResult] = await Promise.allSettled([stdoutPromise, stderrPromise]);
     const stdout = stdoutResult.status === "fulfilled" ? stdoutResult.value : "";
     const stderr = stderrResult.status === "fulfilled" ? stderrResult.value : String(stderrResult.reason || "");
@@ -477,7 +478,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
       await markAccountError(account.id, errorMsg);
       const log = addAuthLog({
         type: "login_failed",
-        accountId: account.id,
+        accountId,
         email: account.email,
         provider,
         error: errorMsg,
@@ -485,7 +486,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
       });
       broadcast({
         type: "login_failed",
-        data: { logId: log.id, id: account.id, email: account.email, provider, error: errorMsg },
+        data: { logId: log.id, id: accountId, email: account.email, provider, error: errorMsg },
       });
       return { success: false, error: errorMsg };
     }
@@ -497,7 +498,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
       await markAccountError(account.id, errorMsg);
       const log = addAuthLog({
         type: "login_failed",
-        accountId: account.id,
+        accountId,
         email: account.email,
         provider,
         error: errorMsg,
@@ -505,7 +506,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
       });
       broadcast({
         type: "login_failed",
-        data: { logId: log.id, id: account.id, email: account.email, provider, error: errorMsg },
+        data: { logId: log.id, id: accountId, email: account.email, provider, error: errorMsg },
       });
       return { success: false, error: errorMsg };
     }
@@ -523,7 +524,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
       await markAccountError(account.id, errorMsg);
       const log = addAuthLog({
         type: "login_failed",
-        accountId: account.id,
+        accountId,
         email: account.email,
         provider,
         error: errorMsg,
@@ -531,7 +532,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
       });
       broadcast({
         type: "login_failed",
-        data: { logId: log.id, id: account.id, email: account.email, provider, error: errorMsg },
+        data: { logId: log.id, id: accountId, email: account.email, provider, error: errorMsg },
       });
       return { success: false, error: errorMsg };
     }
@@ -549,25 +550,31 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
 
       if (!upgradeResult || !upgradeResult.upgrade_success) {
         const upgradeError = upgradeResult?.upgrade_error || "upgrade_not_attempted";
-        await db
-          .update(accounts)
-          .set({
-            status: "error",
-            tokens: credentials as unknown,
-            errorMessage: `Login OK but upgrade failed: ${upgradeError}`,
-            lastLoginAt: new Date(),
-            updatedAt: new Date(),
-          })
-          .where(eq(accounts.id, account.id));
+        await call.upsertAccount({
+          id: account.id,
+          provider: account.provider,
+          email: account.email,
+          password: account.password,
+          status: "error",
+          enabled: account.enabled,
+          tokens: JSON.stringify(credentials),
+          quotaLimit: account.quotaLimit,
+          quotaRemaining: account.quotaRemaining,
+          quotaResetAt: account.quotaResetAt ?? null,
+          lastUsedAt: account.lastUsedAt ?? null,
+          lastLoginAt: BigInt(Date.now()),
+          errorMessage: `Login OK but upgrade failed: ${upgradeError}`,
+          metadata: account.metadata ?? null,
+        });
 
         if (upgradeResult?.card_last4) {
           const cardStatus = upgradeError.includes("declined") ? "declined" as const : "error" as const;
-          await handleCardResult(account.id, upgradeResult.card_last4, cardStatus);
+          await handleCardResult(accountId, upgradeResult.card_last4, cardStatus);
         }
 
         const log = addAuthLog({
           type: "login_failed",
-          accountId: account.id,
+          accountId,
           email: account.email,
           provider,
           error: `Upgrade failed: ${upgradeError}`,
@@ -575,14 +582,14 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
         });
         broadcast({
           type: "login_failed",
-          data: { logId: log.id, id: account.id, email: account.email, provider, error: `Upgrade failed: ${upgradeError}` },
+          data: { logId: log.id, id: accountId, email: account.email, provider, error: `Upgrade failed: ${upgradeError}` },
         });
         return { success: false, error: `Upgrade failed: ${upgradeError}`, noRetry: true };
       }
 
       // Upgrade succeeded — update card status
       if (upgradeResult.card_last4) {
-        await handleCardResult(account.id, upgradeResult.card_last4, "success");
+        await handleCardResult(accountId, upgradeResult.card_last4, "success");
       }
     }
 
@@ -605,23 +612,26 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
       }
     }
 
-    await db
-      .update(accounts)
-      .set({
-        status: "active",
-        tokens: credentials as unknown,
-        quotaLimit,
-        quotaRemaining,
-        lastLoginAt: new Date(),
-        errorMessage: null,
-        metadata: quotaMetadata as unknown,
-        updatedAt: new Date(),
-      })
-      .where(eq(accounts.id, account.id));
+    await call.upsertAccount({
+      id: account.id,
+      provider: account.provider,
+      email: account.email,
+      password: account.password,
+      status: "active",
+      enabled: account.enabled,
+      tokens: JSON.stringify(credentials),
+      quotaLimit,
+      quotaRemaining,
+      quotaResetAt: account.quotaResetAt ?? null,
+      lastUsedAt: account.lastUsedAt ?? null,
+      lastLoginAt: BigInt(Date.now()),
+      errorMessage: null,
+      metadata: JSON.stringify(quotaMetadata),
+    });
 
     const successLog = addAuthLog({
       type: "login_success",
-      accountId: account.id,
+      accountId,
       email: account.email,
       provider,
       step: "success",
@@ -633,7 +643,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
       type: "login_success",
       data: {
         logId: successLog.id,
-        id: account.id,
+        id: accountId,
         email: account.email,
         provider,
         quotaLimit,
@@ -646,11 +656,11 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
     const errorMsg = error instanceof Error ? error.message : String(error);
 
     // If manually stopped, don't retry
-    if (manuallyStoppedIds.has(account.id)) {
-      manuallyStoppedIds.delete(account.id);
+    if (manuallyStoppedIds.has(accountId)) {
+      manuallyStoppedIds.delete(accountId);
       const log = addAuthLog({
         type: "login_failed",
-        accountId: account.id,
+        accountId,
         email: account.email,
         provider,
         error: "Stopped by user",
@@ -658,7 +668,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
       });
       broadcast({
         type: "login_failed",
-        data: { logId: log.id, id: account.id, email: account.email, provider, error: "Stopped by user" },
+        data: { logId: log.id, id: accountId, email: account.email, provider, error: "Stopped by user" },
       });
       return { success: false, error: "Stopped by user", noRetry: true };
     }
@@ -666,7 +676,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
     await markAccountError(account.id, errorMsg);
     const log = addAuthLog({
       type: "login_failed",
-      accountId: account.id,
+      accountId,
       email: account.email,
       provider,
       error: errorMsg,
@@ -674,7 +684,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
     });
     broadcast({
       type: "login_failed",
-      data: { logId: log.id, id: account.id, email: account.email, provider, error: errorMsg },
+      data: { logId: log.id, id: accountId, email: account.email, provider, error: errorMsg },
     });
 
     // For kiro-pro: if we already passed login phase (upgrade/payment steps), don't retry
@@ -688,7 +698,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
 
     return { success: false, error: errorMsg };
   } finally {
-    activeProcesses.delete(account.id);
+    activeProcesses.delete(accountId);
   }
 }
 
@@ -785,13 +795,10 @@ export async function loginAllProviders(
 /**
  * Helper to mark an account as errored in the database
  */
-async function markAccountError(accountId: number, errorMsg: string) {
-  await db
-    .update(accounts)
-    .set({
-      status: "error",
-      errorMessage: errorMsg,
-      updatedAt: new Date(),
-    })
-    .where(eq(accounts.id, accountId));
+async function markAccountError(accountId: bigint, errorMsg: string) {
+  await call.updateAccountStatus({
+    id: accountId,
+    status: "error",
+    errorMessage: errorMsg,
+  });
 }

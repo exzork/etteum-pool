@@ -1,6 +1,4 @@
-import { db } from "../db/index";
-import { accounts } from "../db/schema";
-import { and, eq, inArray } from "drizzle-orm";
+import { db, type Account } from "../db/index";
 import { broadcast } from "../ws/index";
 import { addAuthLog } from "./logs";
 import { warmupAccount, type WarmupResult } from "./warmup-runner";
@@ -46,7 +44,7 @@ class WarmupQueue {
     const item: QueueItem = { accountId, retries: 0, status: "queued", addedAt: new Date() };
     this.queue.push(item);
 
-    const [account] = await db.select().from(accounts).where(eq(accounts.id, accountId));
+    const account = db.accounts.findById(BigInt(accountId));
     const provider = account?.provider;
 
     if (provider) {
@@ -80,13 +78,16 @@ class WarmupQueue {
     const newIds = accountIds.filter((id) => !existingIds.has(id));
     if (newIds.length === 0) return;
 
-    // Batch-load accounts to avoid N+1 queries
-    const rows = await db.select().from(accounts).where(inArray(accounts.id, newIds));
-    const accountMap = new Map(rows.map((a) => [a.id, a]));
+    // Batch-load accounts to avoid N+1 queries — use local cache
+    const accountMap = new Map<number, Account>();
+    for (const id of newIds) {
+      const acc = db.accounts.findById(BigInt(id));
+      if (acc) accountMap.set(id, acc);
+    }
 
     // Reset progress for affected providers
-    for (const row of rows) {
-      this.progressByProvider[row.provider] = { total: 0, completed: 0 };
+    for (const [, acc] of accountMap) {
+      this.progressByProvider[acc.provider] = { total: 0, completed: 0 };
     }
 
     // Add all items to queue
@@ -117,7 +118,7 @@ class WarmupQueue {
   }
 
   async queueAll(options: WarmupAllOptions = {}): Promise<number> {
-    const providers = options.providers?.length
+    const targetProviders = options.providers?.length
       ? options.providers
       : ["kiro", "kiro-pro", "codebuddy"];
     const statuses = options.statuses?.length
@@ -126,14 +127,14 @@ class WarmupQueue {
         ? ["active", "exhausted", "error", "pending"]
         : ["active", "exhausted", "error"];
 
-    const rows = await db
-      .select({ id: accounts.id })
-      .from(accounts)
-      .where(and(inArray(accounts.provider, providers), inArray(accounts.status, statuses)));
+    // Filter accounts by provider and status from local cache
+    const allAccounts = db.accounts.getAll();
+    const matchingIds = allAccounts
+      .filter((a) => targetProviders.includes(a.provider) && statuses.includes(a.status))
+      .map((a) => Number(a.id));
 
-    const ids = rows.map((row) => row.id);
-    await this.enqueueBulk(ids);
-    return ids.length;
+    await this.enqueueBulk(matchingIds);
+    return matchingIds.length;
   }
 
   getStatus() {
@@ -242,18 +243,18 @@ class WarmupQueue {
   }
 
   private async processItem(item: QueueItem): Promise<void> {
-    const [account] = await db.select().from(accounts).where(eq(accounts.id, item.accountId));
+    const account = db.accounts.findById(BigInt(item.accountId));
     if (!account) {
       item.status = "failed";
       return;
     }
 
     // Cache the provider for this account
-    this.setCachedAccountProvider(account.id, account.provider);
+    this.setCachedAccountProvider(Number(account.id), account.provider);
 
     const log = addAuthLog({
       type: "warmup_processing",
-      accountId: account.id,
+      accountId: Number(account.id),
       email: account.email,
       provider: account.provider,
       step: "queued_check",
@@ -263,8 +264,8 @@ class WarmupQueue {
       type: "warmup_processing",
       data: {
         logId: log.id,
-        accountId: account.id,
-        id: account.id,
+        accountId: Number(account.id),
+        id: Number(account.id),
         email: account.email,
         provider: account.provider,
         attempt: item.retries + 1,
@@ -311,7 +312,7 @@ class WarmupQueue {
       const message = error instanceof Error ? error.message : String(error);
       const failLog = addAuthLog({
         type: "warmup_auth_error",
-        accountId: account.id,
+        accountId: Number(account.id),
         email: account.email,
         provider: account.provider,
         error: message,
@@ -321,8 +322,8 @@ class WarmupQueue {
         type: "warmup_auth_error",
         data: {
           logId: failLog.id,
-          accountId: account.id,
-          id: account.id,
+          accountId: Number(account.id),
+          id: Number(account.id),
           email: account.email,
           provider: account.provider,
           error: message,

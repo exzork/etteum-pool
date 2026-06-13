@@ -3,7 +3,7 @@ import { providers, getAllModels, type ProviderName } from "./providers/registry
 import { isNonAccountRequestError, isTransientError } from "./errors";
 import { applyPudidilFilters } from "./filters";
 import { pool } from "./pool";
-import type { Account } from "../db/schema";
+import type { Account } from "../db/index";
 
 export interface RouteResult {
   result: ProviderResult;

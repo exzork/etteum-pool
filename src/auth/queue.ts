@@ -1,10 +1,7 @@
-import { db } from "../db/index";
-import { accounts } from "../db/schema";
-import { eq, inArray } from "drizzle-orm";
+import { db, call, type Account } from "../db/index";
 import { loginAccount, loginAllProviders } from "./runner";
 import { encrypt } from "../utils/crypto";
 import { broadcast } from "../ws/index";
-import type { Account } from "../db/schema";
 import { addAuthLog } from "./logs";
 
 interface QueueItem {
@@ -67,13 +64,10 @@ class LoginQueue {
   async queueAllPending(options: { headless?: boolean; browserEngine?: string; concurrency?: number } = {}): Promise<number> {
     if (options.concurrency !== undefined) this.setConcurrency(options.concurrency);
 
-    const pendingAccounts = await db
-      .select()
-      .from(accounts)
-      .where(eq(accounts.status, "pending"));
+    const pendingAccounts = db.accounts.getAll().filter((a) => a.status === "pending");
 
     for (const acc of pendingAccounts) {
-      this.enqueue(acc.id, options);
+      this.enqueue(Number(acc.id), options);
     }
 
     return pendingAccounts.length;
@@ -93,21 +87,34 @@ class LoginQueue {
         if (!["kiro", "kiro-pro", "codebuddy", "canva", "codex", "qoder"].includes(provider)) continue;
 
         try {
-          const [newAccount] = await db
-            .insert(accounts)
-            .values({
-              provider,
-              email: item.email,
-              password: encrypt(item.password),
-              status: "pending",
-            })
-            .onConflictDoNothing()
-            .returning();
+          // Check if account already exists for this provider+email
+          const existing = db.accounts.findByProviderEmail(provider, item.email);
+          if (existing) continue;
 
-          if (newAccount) {
-            created++;
-            accountIds.push(newAccount.id);
-          }
+          // Generate a new ID (use max existing + 1)
+          const allAccounts = db.accounts.getAll();
+          const maxId = allAccounts.reduce((max, a) => a.id > max ? a.id : max, 0n);
+          const newId = maxId + 1n;
+
+          await call.upsertAccount({
+            id: newId,
+            provider,
+            email: item.email,
+            password: encrypt(item.password),
+            status: "pending",
+            enabled: true,
+            tokens: null,
+            quotaLimit: 0,
+            quotaRemaining: 0,
+            quotaResetAt: null,
+            lastUsedAt: null,
+            lastLoginAt: null,
+            errorMessage: null,
+            metadata: null,
+          });
+
+          created++;
+          accountIds.push(Number(newId));
         } catch {
           // Skip duplicates
         }
@@ -215,10 +222,7 @@ class LoginQueue {
   private async processItem(item: QueueItem): Promise<void> {
     if (item.generation !== this.clearGeneration) return;
 
-    const [account] = await db
-      .select()
-      .from(accounts)
-      .where(eq(accounts.id, item.accountId));
+    const account = db.accounts.findById(BigInt(item.accountId));
 
     if (!account) return;
     if (item.generation !== this.clearGeneration) return;

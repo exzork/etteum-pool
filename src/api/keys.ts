@@ -1,8 +1,5 @@
 import { Hono } from "hono";
-import { db } from "../db/index";
-import { client } from "../db/index";
-import { apiKeys } from "../db/schema";
-import { eq } from "drizzle-orm";
+import { db, call, type ApiKey } from "../db/index";
 import { config } from "../config";
 
 export const keysRouter = new Hono();
@@ -35,9 +32,9 @@ export async function resolveApiKey(token: string): Promise<ResolvedApiKey | nul
   }
 
   // Check DB keys
-  const [row] = await db.select().from(apiKeys).where(eq(apiKeys.key, token));
+  const row = db.apiKeys.findByKey(token);
   if (row) {
-    return { id: row.id, name: row.name, key: row.key };
+    return { id: Number(row.id), name: row.name, key: row.key };
   }
 
   return null;
@@ -48,45 +45,23 @@ export async function isValidApiKey(token: string): Promise<boolean> {
 }
 
 /**
- * Ensure the api_keys table and new columns exist (idempotent).
- * Called on startup before any key operations.
+ * No-op: SpacetimeDB handles schema automatically.
+ * Kept for backward compatibility with startup code.
  */
 export function ensureApiKeysTable() {
-  client.exec(`
-    CREATE TABLE IF NOT EXISTS api_keys (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      key TEXT NOT NULL UNIQUE,
-      created_at INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
-    )
-  `);
-  // Add api_key_id and api_key_name columns to request_logs if missing
-  try { client.exec(`ALTER TABLE request_logs ADD COLUMN api_key_id INTEGER`); } catch {}
-  try { client.exec(`ALTER TABLE request_logs ADD COLUMN api_key_name TEXT`); } catch {}
-  // Add api_key_id and api_key_name columns to usage_summary if missing
-  try { client.exec(`ALTER TABLE usage_summary ADD COLUMN api_key_id INTEGER`); } catch {}
-  try { client.exec(`ALTER TABLE usage_summary ADD COLUMN api_key_name TEXT`); } catch {}
-  // Add index on api_key_id for request_logs
-  try { client.exec(`CREATE INDEX IF NOT EXISTS request_logs_api_key_idx ON request_logs(api_key_id)`); } catch {}
-  try { client.exec(`CREATE INDEX IF NOT EXISTS usage_summary_api_key_idx ON usage_summary(api_key_id)`); } catch {}
-  // Migrate unique index to include api_key_id (set NULL → 0 first, then recreate index)
-  try {
-    client.exec(`UPDATE usage_summary SET api_key_id = 0 WHERE api_key_id IS NULL`);
-    client.exec(`DROP INDEX IF EXISTS usage_summary_bucket_provider_model_idx`);
-    client.exec(`CREATE UNIQUE INDEX IF NOT EXISTS usage_summary_bucket_provider_model_key_idx ON usage_summary(bucket, provider, model, api_key_id)`);
-  } catch {}
+  // No-op — SpacetimeDB manages the schema
 }
 
 // ── CRUD Routes ──────────────────────────────────────────────────
 
 /** GET /api/keys - List all API keys */
 keysRouter.get("/", async (c) => {
-  const rows = await db.select().from(apiKeys);
+  const rows = db.apiKeys.getAll();
   // Also include the env key as "default" if it exists
   const envKey = config.apiKey;
   const all = [
     { id: 0, name: "default", key: envKey, source: "env", createdAt: null },
-    ...rows.map((r) => ({ ...r, source: "database" })),
+    ...rows.map((r) => ({ id: Number(r.id), name: r.name, key: r.key, createdAt: Number(r.createdAt), source: "database" })),
   ];
   return c.json({ data: all });
 });
@@ -99,54 +74,53 @@ keysRouter.post("/", async (c) => {
   }
 
   const key = body.key && body.key.length >= 16 ? body.key : generateApiKey();
-  const [row] = await db.insert(apiKeys).values({ name: body.name.trim(), key }).returning();
-  return c.json({ data: row }, 201);
+  // Use id=0n to signal "create new" (server assigns real ID)
+  const id = BigInt(Date.now());
+  await call.upsertApiKey({ id, name: body.name.trim(), key });
+  // Return the created key info
+  return c.json({ data: { id: Number(id), name: body.name.trim(), key } }, 201);
 });
 
 /** PUT /api/keys/:id - Update key name */
 keysRouter.put("/:id", async (c) => {
-  const id = Number(c.req.param("id"));
-  if (id === 0) return c.json({ error: "Cannot modify the default env key" }, 400);
+  const id = BigInt(c.req.param("id"));
+  if (id === 0n) return c.json({ error: "Cannot modify the default env key" }, 400);
 
   const body = await c.req.json<{ name?: string }>();
   if (!body.name || !body.name.trim()) {
     return c.json({ error: "name is required" }, 400);
   }
 
-  const [updated] = await db
-    .update(apiKeys)
-    .set({ name: body.name.trim() })
-    .where(eq(apiKeys.id, id))
-    .returning();
+  const existing = db.apiKeys.findById(id);
+  if (!existing) return c.json({ error: "Key not found" }, 404);
 
-  if (!updated) return c.json({ error: "Key not found" }, 404);
-  return c.json({ data: updated });
+  await call.upsertApiKey({ id, name: body.name.trim(), key: existing.key });
+  return c.json({ data: { id: Number(id), name: body.name.trim(), key: existing.key } });
 });
 
 /** DELETE /api/keys/:id - Delete an API key */
 keysRouter.delete("/:id", async (c) => {
-  const id = Number(c.req.param("id"));
-  if (id === 0) return c.json({ error: "Cannot delete the default env key" }, 400);
+  const id = BigInt(c.req.param("id"));
+  if (id === 0n) return c.json({ error: "Cannot delete the default env key" }, 400);
 
-  const deleted = await db.delete(apiKeys).where(eq(apiKeys.id, id)).returning();
-  if (deleted.length === 0) return c.json({ error: "Key not found" }, 404);
+  const existing = db.apiKeys.findById(id);
+  if (!existing) return c.json({ error: "Key not found" }, 404);
+
+  await call.deleteApiKey({ id });
   return c.json({ success: true });
 });
 
 /** POST /api/keys/regenerate/:id - Regenerate a key's secret */
 keysRouter.post("/regenerate/:id", async (c) => {
-  const id = Number(c.req.param("id"));
-  if (id === 0) return c.json({ error: "Cannot regenerate the default env key" }, 400);
+  const id = BigInt(c.req.param("id"));
+  if (id === 0n) return c.json({ error: "Cannot regenerate the default env key" }, 400);
+
+  const existing = db.apiKeys.findById(id);
+  if (!existing) return c.json({ error: "Key not found" }, 404);
 
   const key = generateApiKey();
-  const [updated] = await db
-    .update(apiKeys)
-    .set({ key })
-    .where(eq(apiKeys.id, id))
-    .returning();
-
-  if (!updated) return c.json({ error: "Key not found" }, 404);
-  return c.json({ data: updated });
+  await call.upsertApiKey({ id, name: existing.name, key });
+  return c.json({ data: { id: Number(id), name: existing.name, key } });
 });
 
 /** POST /api/keys/test - Validate a key (no auth required) */

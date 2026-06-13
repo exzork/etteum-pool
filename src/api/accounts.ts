@@ -1,10 +1,7 @@
 import { Hono } from "hono";
-import { db } from "../db/index";
-import { accounts, requestLogs, vccCards, vccTransactions } from "../db/schema";
-import { eq } from "drizzle-orm";
+import { db, call, type Account } from "../db/index";
 import { encrypt, decrypt } from "../utils/crypto";
 import { broadcast } from "../ws/index";
-import type { NewAccount } from "../db/schema";
 import { loginQueue } from "../auth/queue";
 import { warmupQueue } from "../auth/warmup-queue";
 import { warmupAccount } from "../auth/warmup-runner";
@@ -12,6 +9,26 @@ import { pool, type ProviderName } from "../proxy/pool";
 import { activateQoderPat } from "../proxy/providers/qoder";
 
 export const accountsRouter = new Hono();
+
+/** Helper: generate a new unique bigint ID based on timestamp + random */
+function newId(): bigint {
+  return BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
+}
+
+/** Helper: convert Date to bigint (ms since epoch) */
+function dateToBigint(d: Date): bigint {
+  return BigInt(d.getTime());
+}
+
+/** Helper: parse tokens field (stored as JSON string in SpacetimeDB) */
+function parseTokens(tokens: string | undefined): Record<string, unknown> | undefined {
+  if (!tokens) return undefined;
+  try {
+    return JSON.parse(tokens);
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * GET /api/accounts/warmup-queue - Get warmup progress per provider
@@ -24,13 +41,13 @@ accountsRouter.get("/warmup-queue", (c) => {
  * GET /api/accounts - List all accounts
  */
 accountsRouter.get("/", async (c) => {
-  const allAccounts = await db.select().from(accounts);
+  const allAccounts = db.accounts.getAll();
 
   // Don't expose passwords in response
   const sanitized = allAccounts.map((acc) => ({
     ...acc,
     password: "***",
-    tokens: acc.tokens ? "[set]" : null,
+    tokens: acc.tokens ? "[set]" : undefined,
   }));
 
   return c.json({ data: sanitized, total: sanitized.length });
@@ -64,9 +81,7 @@ accountsRouter.post("/byok", async (c) => {
   }
 
   // Check uniqueness
-  const existing = await db.select().from(accounts)
-    .where(eq(accounts.email, body.label))
-    .then((rows) => rows.find((r) => r.provider === "byok"));
+  const existing = db.accounts.findByProviderEmail("byok", body.label);
 
   if (existing) {
     return c.json({ error: "BYOK provider with this label already exists" }, 409);
@@ -85,23 +100,29 @@ accountsRouter.post("/byok", async (c) => {
   };
 
   try {
-    const result = await db.insert(accounts).values({
+    const id = newId();
+    await call.upsertAccount({
+      id,
       provider: "byok",
       email: body.label,
       password: encryptedKey,
       status: "active",
       enabled: true,
-      tokens: tokens,
+      tokens: JSON.stringify(tokens),
       quotaLimit: -1,
       quotaRemaining: -1,
-    }).returning();
+      quotaResetAt: null,
+      lastUsedAt: null,
+      lastLoginAt: null,
+      errorMessage: null,
+      metadata: null,
+    });
 
-    const created = result[0]!;
     pool.invalidate("byok" as ProviderName);
 
     broadcast({
       type: "byok_created",
-      data: { id: created.id, label: body.label },
+      data: { id, label: body.label },
     });
 
     // Refresh BYOK model cache
@@ -110,7 +131,7 @@ accountsRouter.post("/byok", async (c) => {
 
     return c.json({
       success: true,
-      id: created.id,
+      id,
       label: body.label,
       models: body.models.map((m) => `${body.label}-${m}`),
     }, 201);
@@ -123,13 +144,10 @@ accountsRouter.post("/byok", async (c) => {
  * GET /api/accounts/byok - List all BYOK providers
  */
 accountsRouter.get("/byok", async (c) => {
-  const byokAccounts = await db.select().from(accounts)
-    .where(eq(accounts.provider, "byok"));
+  const byokAccounts = db.accounts.getByProvider("byok");
 
   const providers = byokAccounts.map((acc) => {
-    const tokens = typeof acc.tokens === "string"
-      ? JSON.parse(acc.tokens)
-      : acc.tokens;
+    const tokens = parseTokens(acc.tokens);
 
     return {
       id: acc.id,
@@ -140,7 +158,7 @@ accountsRouter.get("/byok", async (c) => {
       model_prefix: tokens?.model_prefix || acc.email,
       status: acc.status,
       enabled: acc.enabled,
-      available_models: (tokens?.models || []).map((m: string) => `${tokens?.model_prefix || acc.email}-${m}`),
+      available_models: ((tokens?.models as string[]) || []).map((m: string) => `${tokens?.model_prefix || acc.email}-${m}`),
     };
   });
 
@@ -151,7 +169,7 @@ accountsRouter.get("/byok", async (c) => {
  * PATCH /api/accounts/byok/:id - Update BYOK provider
  */
 accountsRouter.patch("/byok/:id", async (c) => {
-  const id = Number(c.req.param("id"));
+  const id = BigInt(c.req.param("id"));
   const body = await c.req.json<{
     base_url?: string;
     api_key?: string;
@@ -160,17 +178,13 @@ accountsRouter.patch("/byok/:id", async (c) => {
     headers?: Record<string, string>;
   }>();
 
-  const account = await db.select().from(accounts)
-    .where(eq(accounts.id, id))
-    .get();
+  const account = db.accounts.findById(id);
 
   if (!account || account.provider !== "byok") {
     return c.json({ error: "BYOK provider not found" }, 404);
   }
 
-  const tokens = typeof account.tokens === "string"
-    ? JSON.parse(account.tokens)
-    : account.tokens || {};
+  const tokens = parseTokens(account.tokens) || {};
 
   // Update fields
   if (body.base_url) tokens.base_url = body.base_url;
@@ -178,18 +192,24 @@ accountsRouter.patch("/byok/:id", async (c) => {
   if (body.models) tokens.models = body.models;
   if (body.headers) tokens.headers = body.headers;
 
-  const updateData: Record<string, unknown> = {
-    tokens: tokens,
-    updatedAt: new Date(),
-  };
+  const password = body.api_key ? encrypt(body.api_key) : account.password;
 
-  if (body.api_key) {
-    updateData.password = encrypt(body.api_key);
-  }
-
-  await db.update(accounts)
-    .set(updateData)
-    .where(eq(accounts.id, id));
+  await call.upsertAccount({
+    id: account.id,
+    provider: account.provider,
+    email: account.email,
+    password,
+    status: account.status,
+    enabled: account.enabled,
+    tokens: JSON.stringify(tokens),
+    quotaLimit: account.quotaLimit,
+    quotaRemaining: account.quotaRemaining,
+    quotaResetAt: account.quotaResetAt ?? null,
+    lastUsedAt: account.lastUsedAt ?? null,
+    lastLoginAt: account.lastLoginAt ?? null,
+    errorMessage: account.errorMessage ?? null,
+    metadata: account.metadata ?? null,
+  });
 
   pool.invalidate("byok" as ProviderName);
 
@@ -206,7 +226,7 @@ accountsRouter.patch("/byok/:id", async (c) => {
     success: true,
     id,
     label: account.email,
-    models: (tokens.models || []).map((m: string) => `${tokens.model_prefix || account.email}-${m}`),
+    models: ((tokens.models as string[]) || []).map((m: string) => `${tokens.model_prefix || account.email}-${m}`),
   });
 });
 
@@ -214,18 +234,14 @@ accountsRouter.patch("/byok/:id", async (c) => {
  * DELETE /api/accounts/byok/:id - Delete BYOK provider
  */
 accountsRouter.delete("/byok/:id", async (c) => {
-  const id = Number(c.req.param("id"));
+  const id = BigInt(c.req.param("id"));
 
-  // Nullify foreign key references
-  await db.update(requestLogs).set({ accountId: null }).where(eq(requestLogs.accountId, id));
-
-  const result = await db.delete(accounts)
-    .where(eq(accounts.id, id))
-    .returning();
-
-  if (result.length === 0) {
+  const account = db.accounts.findById(id);
+  if (!account || account.provider !== "byok") {
     return c.json({ error: "BYOK provider not found" }, 404);
   }
+
+  await call.deleteAccount({ id });
 
   pool.invalidate("byok" as ProviderName);
 
@@ -244,15 +260,13 @@ accountsRouter.delete("/byok/:id", async (c) => {
 /**
  * Helper: Auto-fix account if in error state after successful test
  */
-async function autoFixAccountIfError(accountId: number, accountStatus: string) {
+async function autoFixAccountIfError(accountId: bigint, accountStatus: string) {
   if (accountStatus === 'error') {
-    await db.update(accounts)
-      .set({
-        status: 'active',
-        errorMessage: null,
-        updatedAt: new Date()
-      })
-      .where(eq(accounts.id, accountId));
+    await call.updateAccountStatus({
+      id: accountId,
+      status: 'active',
+      errorMessage: null,
+    });
     pool.invalidate('byok');
     const { refreshByokModels } = await import("../proxy/providers/registry");
     await refreshByokModels();
@@ -271,31 +285,27 @@ async function autoFixAccountIfError(accountId: number, accountStatus: string) {
  * Returns latency_ms and auto_fixed status.
  */
 accountsRouter.post("/byok/:id/test", async (c) => {
-  const id = Number(c.req.param("id"));
+  const id = BigInt(c.req.param("id"));
   const reqBody = await c.req.json().catch(() => ({})) as { model?: string };
 
-  const account = await db.select().from(accounts)
-    .where(eq(accounts.id, id))
-    .get();
+  const account = db.accounts.findById(id);
 
   if (!account || account.provider !== "byok") {
     return c.json({ error: "BYOK provider not found" }, 404);
   }
 
-  const tokens = typeof account.tokens === "string"
-    ? JSON.parse(account.tokens)
-    : account.tokens;
+  const tokens = parseTokens(account.tokens);
 
-  if (!tokens?.base_url || !tokens?.models || tokens.models.length === 0) {
+  if (!tokens?.base_url || !tokens?.models || (tokens.models as string[]).length === 0) {
     return c.json({ success: false, error: "Invalid BYOK configuration" });
   }
 
   const apiKey = decrypt(account.password);
-  const format = tokens.format || "auto";
-  const testModel = reqBody.model || tokens.models[0];
+  const format = (tokens.format as string) || "auto";
+  const testModel = reqBody.model || (tokens.models as string[])[0];
 
   // Validate model if provided
-  if (reqBody.model && !tokens.models.includes(reqBody.model)) {
+  if (reqBody.model && !(tokens.models as string[]).includes(reqBody.model)) {
     return c.json({
       success: false,
       error: `Model "${reqBody.model}" not found in provider configuration`
@@ -303,16 +313,17 @@ accountsRouter.post("/byok/:id/test", async (c) => {
   }
 
   // Determine endpoint based on format
+  const baseUrl = tokens.base_url as string;
   const isAnthropic = format === "anthropic" ||
-    (format === "auto" && (tokens.base_url.includes("anthropic.com") || tokens.base_url.includes("/v1/messages")));
+    (format === "auto" && (baseUrl.includes("anthropic.com") || baseUrl.includes("/v1/messages")));
 
   const url = isAnthropic
-    ? `${tokens.base_url}/messages`
-    : `${tokens.base_url}/chat/completions`;
+    ? `${baseUrl}/messages`
+    : `${baseUrl}/chat/completions`;
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    ...(tokens.headers || {}),
+    ...((tokens.headers as Record<string, string>) || {}),
   };
 
   const body = isAnthropic
@@ -383,11 +394,8 @@ accountsRouter.post("/byok/:id/test", async (c) => {
  * GET /api/accounts/:id - Get single account
  */
 accountsRouter.get("/:id", async (c) => {
-  const id = Number(c.req.param("id"));
-  const [account] = await db
-    .select()
-    .from(accounts)
-    .where(eq(accounts.id, id));
+  const id = BigInt(c.req.param("id"));
+  const account = db.accounts.findById(id);
 
   if (!account) {
     return c.json({ error: "Account not found" }, 404);
@@ -396,7 +404,7 @@ accountsRouter.get("/:id", async (c) => {
   return c.json({
     ...account,
     password: "***",
-    tokens: account.tokens ? "[set]" : null,
+    tokens: account.tokens ? "[set]" : undefined,
   });
 });
 
@@ -427,35 +435,50 @@ accountsRouter.post("/", async (c) => {
       const { tokens, jobToken } = await activateQoderPat(trimmed);
       const email = jobToken.email || jobToken.name || `qoder-${tokens.userId || Date.now()}@pat`;
 
-      const existing = await db.select().from(accounts)
-        .where(eq(accounts.email, email))
-        .then((rows) => rows.find((r) => r.provider === "qoder"));
+      const existing = db.accounts.findByProviderEmail("qoder", email);
 
       if (existing) {
-        await db.update(accounts).set({
+        await call.upsertAccount({
+          id: existing.id,
+          provider: existing.provider,
+          email: existing.email,
+          password: existing.password,
           status: "active",
-          tokens: tokens as unknown,
+          enabled: existing.enabled,
+          tokens: JSON.stringify(tokens),
+          quotaLimit: existing.quotaLimit,
+          quotaRemaining: existing.quotaRemaining,
+          quotaResetAt: existing.quotaResetAt ?? null,
+          lastUsedAt: existing.lastUsedAt ?? null,
+          lastLoginAt: dateToBigint(new Date()),
           errorMessage: null,
-          lastLoginAt: new Date(),
-          updatedAt: new Date(),
-        }).where(eq(accounts.id, existing.id));
+          metadata: existing.metadata ?? null,
+        });
         pool.invalidate("qoder");
         broadcast({ type: "account_updated", data: { id: existing.id, provider: "qoder", status: "active" } });
         return c.json({ id: existing.id, provider: "qoder", email, status: "active", updated: true }, 200);
       }
 
-      const inserted = await db.insert(accounts).values({
+      const id = newId();
+      await call.upsertAccount({
+        id,
         provider: "qoder",
         email,
         password: encrypt("pat-login"),
         status: "active",
-        tokens: tokens as unknown,
-        lastLoginAt: new Date(),
-      }).returning();
-      const created = inserted[0]!;
+        enabled: true,
+        tokens: JSON.stringify(tokens),
+        quotaLimit: 0,
+        quotaRemaining: 0,
+        quotaResetAt: null,
+        lastUsedAt: null,
+        lastLoginAt: dateToBigint(new Date()),
+        errorMessage: null,
+        metadata: null,
+      });
       pool.invalidate("qoder");
-      broadcast({ type: "account_created", data: { id: created.id, provider: "qoder", email } });
-      return c.json({ ...created, password: "***", tokens: "[set]" }, 201);
+      broadcast({ type: "account_created", data: { id, provider: "qoder", email } });
+      return c.json({ id, provider: "qoder", email, status: "active", password: "***", tokens: "[set]" }, 201);
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       return c.json({ error: `Qoder PAT activation failed: ${msg}` }, 400);
@@ -470,31 +493,40 @@ accountsRouter.post("/", async (c) => {
   }
 
   const encryptedPassword = encrypt(body.password);
-
-  const newAccount: NewAccount = {
-    provider: body.provider,
-    email: body.email,
-    password: encryptedPassword,
-    status: body.tokens ? "active" : (body.status || "pending"),
-    tokens: body.tokens || null,
-  };
+  const status = body.tokens ? "active" : (body.status || "pending");
 
   try {
-    const result = await db.insert(accounts).values(newAccount).returning();
-    const created = result[0]!;
-    pool.invalidate(created.provider as ProviderName);
+    const id = newId();
+    await call.upsertAccount({
+      id,
+      provider: body.provider,
+      email: body.email,
+      password: encryptedPassword,
+      status,
+      enabled: true,
+      tokens: body.tokens ? JSON.stringify(body.tokens) : null,
+      quotaLimit: 0,
+      quotaRemaining: 0,
+      quotaResetAt: null,
+      lastUsedAt: null,
+      lastLoginAt: null,
+      errorMessage: null,
+      metadata: null,
+    });
+
+    pool.invalidate(body.provider as ProviderName);
 
     broadcast({
       type: "account_created",
-      data: { id: created.id, provider: created.provider, email: created.email },
+      data: { id, provider: body.provider, email: body.email },
     });
 
     if (!body.tokens) {
-      loginQueue.enqueue(created.id, { browserEngine: body.browserEngine, headless: body.headless });
+      loginQueue.enqueue(id, { browserEngine: body.browserEngine, headless: body.headless });
     }
 
     return c.json(
-      { ...created, password: "***", tokens: created.tokens ? "[set]" : null, loginQueued: true },
+      { id, provider: body.provider, email: body.email, status, password: "***", tokens: body.tokens ? "[set]" : undefined, loginQueued: true },
       201
     );
   } catch (error) {
@@ -576,26 +608,42 @@ accountsRouter.post("/instant-login", async (c) => {
       };
 
       // Create or update account as active with tokens
-      const existing = await db.select().from(accounts)
-        .where(eq(accounts.email, email))
-        .then((rows) => rows.find((r) => r.provider === "kiro-pro"));
+      const existing = db.accounts.findByProviderEmail("kiro-pro", email);
 
       if (existing) {
-        await db.update(accounts).set({
+        await call.upsertAccount({
+          id: existing.id,
+          provider: existing.provider,
+          email: existing.email,
+          password: existing.password,
           status: "active",
-          tokens: tokens as unknown,
+          enabled: existing.enabled,
+          tokens: JSON.stringify(tokens),
+          quotaLimit: existing.quotaLimit,
+          quotaRemaining: existing.quotaRemaining,
+          quotaResetAt: existing.quotaResetAt ?? null,
+          lastUsedAt: existing.lastUsedAt ?? null,
+          lastLoginAt: dateToBigint(new Date()),
           errorMessage: null,
-          lastLoginAt: new Date(),
-          updatedAt: new Date(),
-        }).where(eq(accounts.id, existing.id));
+          metadata: existing.metadata ?? null,
+        });
       } else {
-        await db.insert(accounts).values({
+        const id = newId();
+        await call.upsertAccount({
+          id,
           provider: "kiro-pro",
           email,
           password: encrypt("instant-login"),
           status: "active",
-          tokens: tokens as unknown,
-          lastLoginAt: new Date(),
+          enabled: true,
+          tokens: JSON.stringify(tokens),
+          quotaLimit: 0,
+          quotaRemaining: 0,
+          quotaResetAt: null,
+          lastUsedAt: null,
+          lastLoginAt: dateToBigint(new Date()),
+          errorMessage: null,
+          metadata: null,
         });
       }
       success++;
@@ -633,11 +681,22 @@ accountsRouter.post("/bulk", async (c) => {
 
   for (const acc of body.accounts) {
     try {
-      await db.insert(accounts).values({
+      const id = newId();
+      await call.upsertAccount({
+        id,
         provider: acc.provider,
         email: acc.email,
         password: encrypt(acc.password),
         status: "pending",
+        enabled: true,
+        tokens: null,
+        quotaLimit: 0,
+        quotaRemaining: 0,
+        quotaResetAt: null,
+        lastUsedAt: null,
+        lastLoginAt: null,
+        errorMessage: null,
+        metadata: null,
       });
       results.push({ email: acc.email, success: true });
     } catch (error) {
@@ -664,7 +723,7 @@ accountsRouter.post("/bulk", async (c) => {
  * PATCH /api/accounts/:id - Update account
  */
 accountsRouter.patch("/:id", async (c) => {
-  const id = Number(c.req.param("id"));
+  const id = BigInt(c.req.param("id"));
   const body = await c.req.json<Partial<{
     status: "active" | "exhausted" | "error" | "pending";
     enabled: boolean;
@@ -676,56 +735,61 @@ accountsRouter.patch("/:id", async (c) => {
     errorMessage: string | null;
   }>>();
 
-  const updateData: Record<string, unknown> = {
-    updatedAt: new Date(),
-  };
-
-  if (body.status) updateData.status = body.status;
-  if (typeof body.enabled === "boolean") updateData.enabled = body.enabled;
-  if (body.tokens) updateData.tokens = body.tokens;
-  if (body.password) updateData.password = encrypt(body.password);
-  if (body.quotaLimit !== undefined) updateData.quotaLimit = body.quotaLimit;
-  if (body.quotaRemaining !== undefined) updateData.quotaRemaining = body.quotaRemaining;
-  if (body.quotaResetAt) updateData.quotaResetAt = new Date(body.quotaResetAt);
-  if (body.errorMessage !== undefined) updateData.errorMessage = body.errorMessage;
-
-  const result = await db
-    .update(accounts)
-    .set(updateData)
-    .where(eq(accounts.id, id))
-    .returning();
-
-  if (result.length === 0) {
+  const account = db.accounts.findById(id);
+  if (!account) {
     return c.json({ error: "Account not found" }, 404);
   }
 
-  const updated = result[0]!;
-  pool.invalidate(updated.provider as ProviderName);
-  broadcast({
-    type: "account_updated",
-    data: { id: updated.id, status: updated.status, enabled: updated.enabled, provider: updated.provider },
+  // Build updated fields
+  const updatedStatus = body.status ?? account.status;
+  const updatedEnabled = typeof body.enabled === "boolean" ? body.enabled : account.enabled;
+  const updatedTokens = body.tokens ? JSON.stringify(body.tokens) : (account.tokens ?? null);
+  const updatedPassword = body.password ? encrypt(body.password) : account.password;
+  const updatedQuotaLimit = body.quotaLimit !== undefined ? body.quotaLimit : account.quotaLimit;
+  const updatedQuotaRemaining = body.quotaRemaining !== undefined ? body.quotaRemaining : account.quotaRemaining;
+  const updatedQuotaResetAt = body.quotaResetAt ? dateToBigint(new Date(body.quotaResetAt)) : (account.quotaResetAt ?? null);
+  const updatedErrorMessage = body.errorMessage !== undefined ? body.errorMessage : (account.errorMessage ?? null);
+
+  await call.upsertAccount({
+    id: account.id,
+    provider: account.provider,
+    email: account.email,
+    password: updatedPassword,
+    status: updatedStatus,
+    enabled: updatedEnabled,
+    tokens: updatedTokens,
+    quotaLimit: updatedQuotaLimit,
+    quotaRemaining: updatedQuotaRemaining,
+    quotaResetAt: updatedQuotaResetAt,
+    lastUsedAt: account.lastUsedAt ?? null,
+    lastLoginAt: account.lastLoginAt ?? null,
+    errorMessage: updatedErrorMessage,
+    metadata: account.metadata ?? null,
   });
 
-  return c.json({ ...updated, password: "***", tokens: updated.tokens ? "[set]" : null });
+  pool.invalidate(account.provider as ProviderName);
+  broadcast({
+    type: "account_updated",
+    data: { id: account.id, status: updatedStatus, enabled: updatedEnabled, provider: account.provider },
+  });
+
+  return c.json({ ...account, status: updatedStatus, enabled: updatedEnabled, password: "***", tokens: updatedTokens ? "[set]" : undefined });
 });
 
 /**
  * POST /api/accounts/:id/toggle - Toggle account enabled flag
  */
 accountsRouter.post("/:id/toggle", async (c) => {
-  const id = Number(c.req.param("id"));
+  const id = BigInt(c.req.param("id"));
   const body = await c.req.json<{ enabled?: boolean }>().catch(() => ({} as { enabled?: boolean }));
 
-  const [current] = await db
-    .select({ enabled: accounts.enabled })
-    .from(accounts)
-    .where(eq(accounts.id, id));
+  const account = db.accounts.findById(id);
 
-  if (!current) {
+  if (!account) {
     return c.json({ error: "Account not found" }, 404);
   }
 
-  const next = typeof body.enabled === "boolean" ? body.enabled : !current.enabled;
+  const next = typeof body.enabled === "boolean" ? body.enabled : !account.enabled;
   const updated = await pool.setEnabled(id, next);
 
   if (!updated) {
@@ -762,24 +826,16 @@ accountsRouter.post("/toggle-all", async (c) => {
  * DELETE /api/accounts/:id - Delete account
  */
 accountsRouter.delete("/:id", async (c) => {
-  const id = Number(c.req.param("id"));
+  const id = BigInt(c.req.param("id"));
 
-  // Nullify foreign key references before deleting
-  await db.update(requestLogs).set({ accountId: null }).where(eq(requestLogs.accountId, id));
-  await db.update(vccCards).set({ usedByAccountId: null }).where(eq(vccCards.usedByAccountId, id));
-  await db.delete(vccTransactions).where(eq(vccTransactions.accountId, id));
-
-  const result = await db
-    .delete(accounts)
-    .where(eq(accounts.id, id))
-    .returning();
-
-  if (result.length === 0) {
+  const account = db.accounts.findById(id);
+  if (!account) {
     return c.json({ error: "Account not found" }, 404);
   }
 
-  const deleted = result[0]!;
-  pool.invalidate(deleted.provider as ProviderName);
+  await call.deleteAccount({ id });
+
+  pool.invalidate(account.provider as ProviderName);
   broadcast({ type: "account_deleted", data: { id } });
 
   return c.json({ success: true, deleted: id });
@@ -789,11 +845,8 @@ accountsRouter.delete("/:id", async (c) => {
  * POST /api/accounts/:id/login - Trigger login for account
  */
 accountsRouter.post("/:id/login", async (c) => {
-  const id = Number(c.req.param("id"));
-  const [account] = await db
-    .select()
-    .from(accounts)
-    .where(eq(accounts.id, id));
+  const id = BigInt(c.req.param("id"));
+  const account = db.accounts.findById(id);
 
   if (!account) {
     return c.json({ error: "Account not found" }, 404);
@@ -810,11 +863,8 @@ accountsRouter.post("/:id/login", async (c) => {
  * POST /api/accounts/:id/refresh-quota - Refresh quota for account
  */
 accountsRouter.post("/:id/refresh-quota", async (c) => {
-  const id = Number(c.req.param("id"));
-  const [account] = await db
-    .select()
-    .from(accounts)
-    .where(eq(accounts.id, id));
+  const id = BigInt(c.req.param("id"));
+  const account = db.accounts.findById(id);
 
   if (!account) {
     return c.json({ error: "Account not found" }, 404);
@@ -832,11 +882,8 @@ accountsRouter.post("/:id/refresh-quota", async (c) => {
  * POST /api/accounts/:id/warmup - Queue non-login WarmUp for account
  */
 accountsRouter.post("/:id/warmup", async (c) => {
-  const id = Number(c.req.param("id"));
-  const [account] = await db
-    .select()
-    .from(accounts)
-    .where(eq(accounts.id, id));
+  const id = BigInt(c.req.param("id"));
+  const account = db.accounts.findById(id);
 
   if (!account) {
     return c.json({ error: "Account not found" }, 404);
@@ -865,31 +912,47 @@ export function decodeJwtPayload(token: string): Record<string, any> {
 }
 
 async function upsertCodexAccount(email: string, tokens: Record<string, unknown>) {
-  const existing = await db.select().from(accounts)
-    .where(eq(accounts.email, email))
-    .then((rows) => rows.find((r) => r.provider === "codex"));
+  const existing = db.accounts.findByProviderEmail("codex", email);
 
   if (existing) {
-    await db.update(accounts).set({
+    await call.upsertAccount({
+      id: existing.id,
+      provider: existing.provider,
+      email: existing.email,
+      password: existing.password,
       status: "active",
-      tokens: tokens as unknown,
+      enabled: existing.enabled,
+      tokens: JSON.stringify(tokens),
+      quotaLimit: existing.quotaLimit,
+      quotaRemaining: existing.quotaRemaining,
+      quotaResetAt: existing.quotaResetAt ?? null,
+      lastUsedAt: existing.lastUsedAt ?? null,
+      lastLoginAt: dateToBigint(new Date()),
       errorMessage: null,
-      lastLoginAt: new Date(),
-      updatedAt: new Date(),
-    }).where(eq(accounts.id, existing.id));
+      metadata: existing.metadata ?? null,
+    });
     return existing.id;
   }
 
-  const inserted = await db.insert(accounts).values({
+  const id = newId();
+  await call.upsertAccount({
+    id,
     provider: "codex",
     email,
     password: encrypt("instant-login"),
     status: "active",
-    tokens: tokens as unknown,
-    lastLoginAt: new Date(),
-  }).returning();
+    enabled: true,
+    tokens: JSON.stringify(tokens),
+    quotaLimit: 0,
+    quotaRemaining: 0,
+    quotaResetAt: null,
+    lastUsedAt: null,
+    lastLoginAt: dateToBigint(new Date()),
+    errorMessage: null,
+    metadata: null,
+  });
 
-  return inserted[0]!.id;
+  return id;
 }
 
 export async function importCodexAccessToken(accessToken: string, name?: string) {
@@ -1170,227 +1233,18 @@ async function handleCodexInstantLogin(c: any, tokens: string[]) {
 }
 
 /**
- * BYOK (Bring Your Own Key) Management Endpoints
- */
-
-/**
- * POST /api/accounts/byok - Create BYOK provider
- */
-accountsRouter.post("/byok", async (c) => {
-  const body = await c.req.json<{
-    label: string;
-    base_url: string;
-    api_key: string;
-    format?: "openai" | "anthropic" | "auto";
-    models: string[];
-    headers?: Record<string, string>;
-  }>();
-
-  if (!body.label || !body.base_url || !body.api_key || !body.models || body.models.length === 0) {
-    return c.json({ error: "label, base_url, api_key, and models[] are required" }, 400);
-  }
-
-  // Validate label format (lowercase alphanumeric + hyphens)
-  if (!/^[a-z0-9-]+$/.test(body.label)) {
-    return c.json({ error: "label must be lowercase alphanumeric with hyphens only" }, 400);
-  }
-
-  // Check uniqueness
-  const existing = await db.select().from(accounts)
-    .where(eq(accounts.email, body.label))
-    .then((rows) => rows.find((r) => r.provider === "byok"));
-
-  if (existing) {
-    return c.json({ error: "BYOK provider with this label already exists" }, 409);
-  }
-
-  // Encrypt API key
-  const encryptedKey = encrypt(body.api_key);
-
-  // Build tokens JSON
-  const tokens = {
-    base_url: body.base_url,
-    format: body.format || "auto",
-    models: body.models,
-    model_prefix: body.label,
-    headers: body.headers || {},
-  };
-
-  try {
-    const result = await db.insert(accounts).values({
-      provider: "byok",
-      email: body.label,
-      password: encryptedKey,
-      status: "active",
-      enabled: true,
-      tokens: tokens,
-      quotaLimit: -1,
-      quotaRemaining: -1,
-    }).returning();
-
-    const created = result[0]!;
-    pool.invalidate("byok" as ProviderName);
-
-    broadcast({
-      type: "byok_created",
-      data: { id: created.id, label: body.label },
-    });
-
-    // Refresh BYOK model cache
-    const { refreshByokModels } = await import("../proxy/providers/registry");
-    await refreshByokModels();
-
-    return c.json({
-      success: true,
-      id: created.id,
-      label: body.label,
-      models: body.models.map((m) => `${body.label}-${m}`),
-    }, 201);
-  } catch (error) {
-    return c.json({ error: error instanceof Error ? error.message : "Unknown error" }, 500);
-  }
-});
-
-/**
- * GET /api/accounts/byok - List all BYOK providers
- */
-accountsRouter.get("/byok", async (c) => {
-  const byokAccounts = await db.select().from(accounts)
-    .where(eq(accounts.provider, "byok"));
-
-  const providers = byokAccounts.map((acc) => {
-    const tokens = typeof acc.tokens === "string"
-      ? JSON.parse(acc.tokens)
-      : acc.tokens;
-
-    return {
-      id: acc.id,
-      label: acc.email,
-      base_url: tokens?.base_url || "",
-      format: tokens?.format || "auto",
-      models: tokens?.models || [],
-      model_prefix: tokens?.model_prefix || acc.email,
-      status: acc.status,
-      enabled: acc.enabled,
-      available_models: (tokens?.models || []).map((m: string) => `${tokens?.model_prefix || acc.email}-${m}`),
-    };
-  });
-
-  return c.json({ providers, total: providers.length });
-});
-
-/**
- * PATCH /api/accounts/byok/:id - Update BYOK provider
- */
-accountsRouter.patch("/byok/:id", async (c) => {
-  const id = Number(c.req.param("id"));
-  const body = await c.req.json<{
-    base_url?: string;
-    api_key?: string;
-    format?: "openai" | "anthropic" | "auto";
-    models?: string[];
-    headers?: Record<string, string>;
-  }>();
-
-  const account = await db.select().from(accounts)
-    .where(eq(accounts.id, id))
-    .get();
-
-  if (!account || account.provider !== "byok") {
-    return c.json({ error: "BYOK provider not found" }, 404);
-  }
-
-  const tokens = typeof account.tokens === "string"
-    ? JSON.parse(account.tokens)
-    : account.tokens || {};
-
-  // Update fields
-  if (body.base_url) tokens.base_url = body.base_url;
-  if (body.format) tokens.format = body.format;
-  if (body.models) tokens.models = body.models;
-  if (body.headers) tokens.headers = body.headers;
-
-  const updateData: Record<string, unknown> = {
-    tokens: tokens,
-    updatedAt: new Date(),
-  };
-
-  if (body.api_key) {
-    updateData.password = encrypt(body.api_key);
-  }
-
-  await db.update(accounts)
-    .set(updateData)
-    .where(eq(accounts.id, id));
-
-  pool.invalidate("byok" as ProviderName);
-
-  broadcast({
-    type: "byok_updated",
-    data: { id },
-  });
-
-  // Refresh BYOK model cache
-  const { refreshByokModels } = await import("../proxy/providers/registry");
-  await refreshByokModels();
-
-  return c.json({
-    success: true,
-    id,
-    label: account.email,
-    models: (tokens.models || []).map((m: string) => `${tokens.model_prefix || account.email}-${m}`),
-  });
-});
-
-/**
- * DELETE /api/accounts/byok/:id - Delete BYOK provider
- */
-accountsRouter.delete("/byok/:id", async (c) => {
-  const id = Number(c.req.param("id"));
-
-  // Nullify foreign key references
-  await db.update(requestLogs).set({ accountId: null }).where(eq(requestLogs.accountId, id));
-
-  const result = await db.delete(accounts)
-    .where(eq(accounts.id, id))
-    .returning();
-
-  if (result.length === 0) {
-    return c.json({ error: "BYOK provider not found" }, 404);
-  }
-
-  pool.invalidate("byok" as ProviderName);
-
-  broadcast({
-    type: "byok_deleted",
-    data: { id },
-  });
-
-  // Refresh BYOK model cache
-  const { refreshByokModels } = await import("../proxy/providers/registry");
-  await refreshByokModels();
-
-  return c.json({ success: true, deleted: id });
-});
-
-/**
  * POST /api/accounts/:id/open-panel - Open web panel in browser with auto-login
  * Supports: kiro, kiro-pro, qoder
  */
 accountsRouter.post("/:id/open-panel", async (c) => {
-  const id = Number(c.req.param("id"));
-  const [account] = await db
-    .select()
-    .from(accounts)
-    .where(eq(accounts.id, id));
+  const id = BigInt(c.req.param("id"));
+  const account = db.accounts.findById(id);
 
   if (!account) {
     return c.json({ error: "Account not found" }, 404);
   }
 
-  const tokens = typeof account.tokens === "string"
-    ? JSON.parse(account.tokens)
-    : account.tokens;
+  const tokens = parseTokens(account.tokens);
 
   if (!tokens) {
     return c.json({ error: "No tokens available" }, 400);
@@ -1426,11 +1280,11 @@ accountsRouter.post("/:id/open-panel", async (c) => {
       };
 
       const accessToken = refreshData.accessToken;
-      const refreshToken = refreshData.refreshToken || tokens.refresh_token;
-      const profileArn = tokens.profile_arn || tokens.profileArn || refreshData.profileArn || "";
+      const refreshToken = (refreshData.refreshToken || tokens.refresh_token) as string;
+      const profileArn = (tokens.profile_arn || tokens.profileArn || refreshData.profileArn || "") as string;
 
       // Extract userId from getUsageLimits response (cached in metadata or from profileArn)
-      const meta = (account.metadata || {}) as Record<string, unknown>;
+      const meta = parseTokens(account.metadata) || {};
       let userId = (meta.kiroUserId as string) || "";
       if (!userId) {
         // Try to fetch userId from getUsageLimits

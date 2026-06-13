@@ -1,6 +1,4 @@
-import { db } from "../db/index";
-import { accounts, type Account } from "../db/schema";
-import { eq } from "drizzle-orm";
+import { db, call, type Account } from "../db/index";
 import { providers } from "../proxy/router";
 import { pool, type ProviderName } from "../proxy/pool";
 import { broadcast } from "../ws/index";
@@ -40,8 +38,9 @@ function shortError(value?: string) {
 }
 
 function mergeWarmupMetadata(account: Account, health: ProviderHealthResult) {
-  const existing = account.metadata && typeof account.metadata === "object" && !Array.isArray(account.metadata)
-    ? account.metadata as Record<string, unknown>
+  const existingStr = account.metadata;
+  const existing = existingStr
+    ? (() => { try { const p = JSON.parse(existingStr); return typeof p === "object" && p && !Array.isArray(p) ? p as Record<string, unknown> : {}; } catch { return {}; } })()
     : {};
 
   return {
@@ -150,11 +149,12 @@ function messageFor(result: WarmupResult) {
 }
 
 export async function warmupAccount(account: Account): Promise<WarmupResult> {
+  const accountId = Number(account.id);
   const provider = providers[account.provider as keyof typeof providers];
   if (!provider) {
     return {
       success: false,
-      accountId: account.id,
+      accountId,
       provider: account.provider,
       email: account.email,
       previousStatus: account.status,
@@ -166,7 +166,7 @@ export async function warmupAccount(account: Account): Promise<WarmupResult> {
 
   const startLog = addAuthLog({
     type: "warmup_processing",
-    accountId: account.id,
+    accountId,
     email: account.email,
     provider: account.provider,
     step: "checking",
@@ -177,8 +177,8 @@ export async function warmupAccount(account: Account): Promise<WarmupResult> {
     type: "warmup_processing",
     data: {
       logId: startLog.id,
-      id: account.id,
-      accountId: account.id,
+      id: accountId,
+      accountId,
       email: account.email,
       provider: account.provider,
       step: "checking",
@@ -239,23 +239,41 @@ export async function warmupAccount(account: Account): Promise<WarmupResult> {
 
   const update = mapHealthToAccountUpdate(account, health);
 
-  const dbUpdate: Record<string, unknown> = {
-    status: update.status,
-    errorMessage: update.errorMessage,
-    metadata: update.metadata,
-    updatedAt: new Date(),
-  };
-  if (update.quotaLimit !== undefined) dbUpdate.quotaLimit = update.quotaLimit;
-  if (update.quotaRemaining !== undefined) dbUpdate.quotaRemaining = update.quotaRemaining;
-  if (update.quotaResetAt !== undefined) dbUpdate.quotaResetAt = update.quotaResetAt;
-  if (update.tokens !== undefined) dbUpdate.tokens = update.tokens;
+  // Build the upsert call with all fields
+  const quotaResetAtBigint: bigint | null = update.quotaResetAt
+    ? BigInt(update.quotaResetAt.getTime())
+    : account.quotaResetAt ?? null;
 
-  await db.update(accounts).set(dbUpdate).where(eq(accounts.id, account.id));
+  const tokensStr: string | null = update.tokens
+    ? JSON.stringify(update.tokens)
+    : account.tokens ?? null;
+
+  const metadataStr: string | null = update.metadata
+    ? JSON.stringify(update.metadata)
+    : null;
+
+  await call.upsertAccount({
+    id: account.id,
+    provider: account.provider,
+    email: account.email,
+    password: account.password,
+    status: update.status,
+    enabled: account.enabled,
+    tokens: tokensStr,
+    quotaLimit: update.quotaLimit ?? account.quotaLimit,
+    quotaRemaining: update.quotaRemaining ?? account.quotaRemaining,
+    quotaResetAt: quotaResetAtBigint,
+    lastUsedAt: account.lastUsedAt ?? null,
+    lastLoginAt: account.lastLoginAt ?? null,
+    errorMessage: update.errorMessage,
+    metadata: metadataStr,
+  });
+
   pool.invalidate(account.provider as ProviderName);
 
   const result: WarmupResult = {
     success: health.kind === "healthy" || health.kind === "exhausted",
-    accountId: account.id,
+    accountId,
     provider: account.provider,
     email: account.email,
     previousStatus: account.status,
@@ -271,7 +289,7 @@ export async function warmupAccount(account: Account): Promise<WarmupResult> {
   const type = eventTypeFor(health.kind);
   const log = addAuthLog({
     type,
-    accountId: account.id,
+    accountId,
     email: account.email,
     provider: account.provider,
     step: health.kind,
@@ -291,8 +309,8 @@ export async function warmupAccount(account: Account): Promise<WarmupResult> {
     type,
     data: {
       logId: log.id,
-      id: account.id,
-      accountId: account.id,
+      id: accountId,
+      accountId,
       email: account.email,
       provider: account.provider,
       status: update.status,
@@ -310,7 +328,7 @@ export async function warmupAccount(account: Account): Promise<WarmupResult> {
   broadcast({
     type: "account_status",
     data: {
-      id: account.id,
+      id: accountId,
       status: update.status,
       provider: account.provider,
       error: update.errorMessage,

@@ -1,7 +1,5 @@
 import { Hono } from "hono";
-import { db } from "../db/index";
-import { modelMappings, settings } from "../db/schema";
-import { asc, eq } from "drizzle-orm";
+import { db, call, type ModelMapping } from "../db/index";
 import { invalidateModelMappingCache } from "../proxy/model-mapping";
 import { getAllModels } from "../proxy/router";
 import { broadcast } from "../ws/index";
@@ -29,19 +27,19 @@ interface MappingInput {
   label?: string | null;
 }
 
-async function getMasterEnabled(): Promise<boolean> {
-  const [row] = await db.select().from(settings).where(eq(settings.key, MAPPING_ENABLED_SETTING));
-  return row?.value == null ? true : row.value !== "false";
+/** Generate a unique bigint ID based on timestamp + random bits */
+function generateId(): bigint {
+  return BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
 }
 
-async function setMasterEnabled(enabled: boolean): Promise<void> {
+function getMasterEnabled(): boolean {
+  const value = db.settings.get(MAPPING_ENABLED_SETTING);
+  return value == null ? true : value !== "false";
+}
+
+function setMasterEnabled(enabled: boolean): void {
   const value = enabled ? "true" : "false";
-  const existing = await db.select().from(settings).where(eq(settings.key, MAPPING_ENABLED_SETTING));
-  if (existing.length > 0) {
-    await db.update(settings).set({ value, updatedAt: new Date() }).where(eq(settings.key, MAPPING_ENABLED_SETTING));
-  } else {
-    await db.insert(settings).values({ key: MAPPING_ENABLED_SETTING, value });
-  }
+  call.upsertSetting({ key: MAPPING_ENABLED_SETTING, value });
 }
 
 /**
@@ -49,10 +47,12 @@ async function setMasterEnabled(enabled: boolean): Promise<void> {
  * models available in the pool (so the dashboard can offer them as targets).
  */
 integrationRouter.get("/", async (c) => {
-  const mappings = await db.select().from(modelMappings).orderBy(asc(modelMappings.priority));
-  const enabled = await getMasterEnabled();
+  const mappings = db.modelMappings.getAll();
+  // Sort by priority ascending
+  mappings.sort((a, b) => a.priority - b.priority);
+  const enabled = getMasterEnabled();
   const models = getAllModels().map((m) => ({ id: m.id, owned_by: m.owned_by }));
-  return c.json({ enabled, mappings, models });
+  return c.json({ enabled, mappings: mappings.map(mappingToResponse), models });
 });
 
 /**
@@ -99,27 +99,39 @@ integrationRouter.put("/", async (c) => {
       });
     }
 
-    // Bulk replace: clear then insert.
-    await db.delete(modelMappings);
-    if (rows.length > 0) {
-      await db.insert(modelMappings).values(rows);
+    // Bulk replace: delete all existing mappings then insert new ones
+    const existing = db.modelMappings.getAll();
+    for (const mapping of existing) {
+      call.deleteModelMapping({ id: mapping.id });
+    }
+    for (const row of rows) {
+      call.upsertModelMapping({
+        id: generateId(),
+        sourcePattern: row.sourcePattern,
+        matchType: row.matchType,
+        targetModel: row.targetModel,
+        enabled: row.enabled,
+        priority: row.priority,
+        label: row.label,
+      });
     }
   }
 
   if (typeof body.enabled === "boolean") {
-    await setMasterEnabled(body.enabled);
+    setMasterEnabled(body.enabled);
   }
 
   invalidateModelMappingCache();
   broadcast({ type: "model_mappings_updated", data: {} });
 
-  const mappings = await db.select().from(modelMappings).orderBy(asc(modelMappings.priority));
-  const enabled = await getMasterEnabled();
-  return c.json({ success: true, enabled, mappings });
+  const mappings = db.modelMappings.getAll();
+  mappings.sort((a, b) => a.priority - b.priority);
+  const enabled = getMasterEnabled();
+  return c.json({ success: true, enabled, mappings: mappings.map(mappingToResponse) });
 });
 
 /**
- * POST /api/integration/apply-config - Apply Claude Code configuration to ~/.claude/settings.json
+ * POST /api/integration/apply-config - Apply the assistant configuration to ~/.claude/settings.json
  * Merges ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN into env section, removes model overrides.
  *
  * The frontend sends the base URL it already resolved (API_BASE) since the server
@@ -134,8 +146,7 @@ integrationRouter.post("/apply-config", async (c) => {
     const body = await c.req.json<{ baseUrl?: string }>().catch((): { baseUrl?: string } => ({}));
 
     // Get current API key
-    const apiKeyRow = await db.select().from(settings).where(eq(settings.key, "api_key"));
-    const apiKey = apiKeyRow[0]?.value || process.env.API_KEY || "REDACTED";
+    const apiKey = db.settings.get("api_key") || process.env.API_KEY || "REDACTED";
 
     // Use frontend-provided base URL, fall back to localhost with config port
     const { config } = await import("../config");
@@ -206,12 +217,7 @@ async function buildProxyInfo(body: {
   modelId?: string;
 }): Promise<ProxyConnectionInfo> {
   const { config } = await import("../config");
-  const apiKeyRow = await db
-    .select()
-    .from(settings)
-    .where(eq(settings.key, "api_key"));
-  const apiKey =
-    apiKeyRow[0]?.value || process.env.API_KEY || "REDACTED";
+  const apiKey = db.settings.get("api_key") || process.env.API_KEY || "REDACTED";
   const proxyOrigin = body.baseUrl || `http://localhost:${config.port}`;
   const openaiBaseUrl = `${proxyOrigin}/v1`;
   const modelId = body.modelId || "kp-sonnet-4.6";
@@ -366,3 +372,19 @@ integrationRouter.post("/clients/:clientId/restore", async (c) => {
     );
   }
 });
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+function mappingToResponse(m: ModelMapping) {
+  return {
+    id: Number(m.id),
+    sourcePattern: m.sourcePattern,
+    matchType: m.matchType,
+    targetModel: m.targetModel,
+    enabled: m.enabled,
+    priority: m.priority,
+    label: m.label ?? null,
+    createdAt: new Date(Number(m.createdAt)).toISOString(),
+    updatedAt: new Date(Number(m.updatedAt)).toISOString(),
+  };
+}

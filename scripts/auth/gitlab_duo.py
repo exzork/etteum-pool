@@ -712,7 +712,7 @@ async def _signup(page: Any, email: str, password: str) -> dict[str, Any]:
         next_btn2 = await page.query_selector('#passwordNext button, #passwordNext')
         if next_btn2:
             await next_btn2.click()
-        await asyncio.sleep(8)
+        await asyncio.sleep(12)
     except Exception as e:
         current_url = page.url
         if "gitlab.com" in current_url:
@@ -721,7 +721,7 @@ async def _signup(page: Any, email: str, password: str) -> dict[str, Any]:
         return {"success": False, "error": f"Google OAuth password step failed: {e}"}
 
     # Handle potential Google consent screen ("Allow GitLab to access...")
-    await asyncio.sleep(3)
+    await asyncio.sleep(5)
     try:
         allow_btn = await page.query_selector(
             'button:has-text("Allow"), button:has-text("Continue"), '
@@ -741,8 +741,8 @@ async def _signup(page: Any, email: str, password: str) -> dict[str, Any]:
 
 async def _check_oauth_result(page: Any) -> dict[str, Any]:
     """Check the result after Google OAuth redirect back to GitLab."""
-    # Wait for redirect from Google back to GitLab (up to 15s)
-    for _ in range(15):
+    # Wait for redirect from Google back to GitLab (up to 30s)
+    for _ in range(30):
         current_url = page.url
         if "gitlab.com" in current_url:
             break

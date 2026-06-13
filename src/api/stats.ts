@@ -164,9 +164,9 @@ statsRouter.get("/usage", async (c) => {
     ? "month"
     : hours <= 24
     ? "10min"
-    : hours <= 24 * 8
+    : hours <= 24 * 7
     ? "hour"
-    : hours <= 24 * 32
+    : hours <= 24 * 30
       ? "day"
       : "month";
 

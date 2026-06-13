@@ -41,16 +41,13 @@ const defaultModelUsage: ModelUsage[] = [];
 
 /**
  * How many hours of data to request from the backend.
- *
- * We intentionally over-fetch so that the current local-timezone period is
- * fully covered regardless of the user's UTC offset.  The extra rows are
- * discarded during local-bucket mapping — only rows that land inside the
- * visible buckets contribute to the chart AND the summary cards.
+ * Matches the visible period exactly — the backend returns the appropriate
+ * grain (10min for 1d, hourly for 7d, daily for 30d, monthly for all).
  */
 function getChartHours(period: string): number | null {
-  if (period === "1d") return 48;
-  if (period === "7d") return 24 * 8;
-  if (period === "30d") return 24 * 32;
+  if (period === "1d") return 24;
+  if (period === "7d") return 24 * 7;
+  if (period === "30d") return 24 * 30;
   return null; // "all"
 }
 

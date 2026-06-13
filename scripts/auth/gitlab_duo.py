@@ -1077,7 +1077,7 @@ async def process_account(email: str, password: str, headless: bool = True) -> d
 
             if not signup_result["success"]:
                 if signup_result.get("already_registered"):
-                    _log("Email already registered - skipping to login")
+                    _log("Email already registered - skipping to login via OAuth")
                 elif signup_result.get("rate_limited"):
                     last_error = signup_result["error"]
                     await _cleanup_browser(session)
@@ -1086,8 +1086,12 @@ async def process_account(email: str, password: str, headless: bool = True) -> d
                 elif signup_result.get("captcha"):
                     return {"success": False, "error": signup_result["error"]}
                 else:
-                    # Non-retryable signup error but try login anyway
-                    _log(f"Signup issue: {signup_result['error']} - attempting login anyway")
+                    # Signup failed (CF, network, etc) - retry
+                    last_error = signup_result["error"]
+                    _log(f"Signup failed: {last_error} - retrying...")
+                    await _cleanup_browser(session)
+                    session = None
+                    continue
 
             # If verification is needed, try to verify via Gmail
             if signup_result.get("needs_verification"):
@@ -1101,18 +1105,18 @@ async def process_account(email: str, password: str, headless: bool = True) -> d
                         "username": signup_result.get("username", ""),
                     }
                 _log("Identity verified! Already logged in via OAuth, skipping login step...")
-                # After OAuth + verification, we're already logged in - skip to PAT creation
-            else:
-                # OAuth succeeded without verification - already logged in
-                _log("OAuth signup complete, already logged in - skipping login step...")
 
-            # Step 2: Login (only needed if OAuth didn't log us in)
-            # Check if we're already on a logged-in page
+            # After OAuth we should be logged in - no need for email/password login
+            # Just verify we're on a GitLab page (not stuck on Google)
             current_url = page.url
-            login_result = {"success": True}  # Default: assume logged in via OAuth
-            if "sign_in" in current_url:
-                _log("Step 2: Login")
-                login_result = await _login(page, email, password)
+            login_result = {"success": True}
+            if "sign_in" in current_url and "gitlab.com" in current_url:
+                # Still on sign-in page - try OAuth login (click Google button again)
+                _log("Still on sign-in page, retrying Google OAuth...")
+                await _cleanup_browser(session)
+                session = None
+                last_error = "OAuth did not complete login"
+                continue
 
             if not login_result["success"]:
                 if login_result.get("rate_limited"):

@@ -17,7 +17,6 @@ import { resolveModelAlias } from "./model-mapping";
 import { eq, sql } from "drizzle-orm";
 import { providerList, refreshByokModels } from "./providers/registry";
 import type { ResolvedApiKey } from "../api/keys";
-import { emitDelta } from "../sync/index";
 
 export const proxyRouter = new Hono();
 
@@ -98,8 +97,6 @@ export async function recordRequest(entry: NewRequestLog) {
       type: "request_log",
       data: { ...entry, email: entry.accountEmail, createdAt: new Date().toISOString() },
     });
-    // Emit sync delta for request log
-    emitDelta("request_logs", "upsert", entry as Record<string, unknown>);
   } catch (err) {
     console.error("[Proxy] Failed to record request:", err);
   }

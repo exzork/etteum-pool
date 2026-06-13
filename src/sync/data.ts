@@ -7,6 +7,7 @@ import { client } from "../db/index";
 import { accounts, apiKeys, settings, filterRules, modelMappings, proxyPool, requestLogs, usageSummary } from "../db/schema";
 import { eq, sql } from "drizzle-orm";
 import type { SyncDelta, SyncFullData, SyncTable } from "./types";
+import { setSuppressEmit } from "./state";
 
 /**
  * Extract full sync-able state from local DB.
@@ -38,6 +39,7 @@ export async function extractFullState(): Promise<SyncFullData> {
  * Uses INSERT OR REPLACE semantics — remote data overwrites local if newer.
  */
 export async function applyFullState(data: SyncFullData, remoteNodeId: string): Promise<number> {
+  setSuppressEmit(true);
   let applied = 0;
 
   // Accounts: upsert by provider+email unique key
@@ -180,6 +182,7 @@ export async function applyFullState(data: SyncFullData, remoteNodeId: string): 
   }
 
   console.log(`[Sync] Applied ${applied} rows from node ${remoteNodeId}`);
+  setSuppressEmit(false);
   return applied;
 }
 
@@ -187,16 +190,22 @@ export async function applyFullState(data: SyncFullData, remoteNodeId: string): 
  * Apply a single delta (incremental change) from a remote node.
  */
 export async function applyDelta(delta: SyncDelta): Promise<boolean> {
+  setSuppressEmit(true);
   try {
     const { table, operation, row } = delta;
 
     if (operation === "delete") {
-      return applyDelete(table, row);
+      const result = applyDelete(table, row);
+      setSuppressEmit(false);
+      return result;
     }
 
     // Upsert
-    return applyUpsert(table, row);
+    const result = applyUpsert(table, row);
+    setSuppressEmit(false);
+    return result;
   } catch (e) {
+    setSuppressEmit(false);
     console.error(`[Sync] Failed to apply delta:`, e);
     return false;
   }

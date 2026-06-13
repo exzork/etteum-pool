@@ -252,24 +252,51 @@ async def _solve_arkose_if_present(page: Any) -> bool:
     _log(f"Arkose public key: {public_key}")
 
     try:
-        import capsolver
-        capsolver.api_key = os.getenv("CAPTCHA_API_KEY", "")
+        import urllib.request as _urllib_request
 
-        solution = capsolver.solve({
-            "type": "FunCaptchaTaskProxyLess",
-            "websiteURL": page.url,
-            "websitePublicKey": public_key,
-        })
-
-        token = solution.get("token", "")
-        if not token:
-            _log(f"Capsolver returned no token: {solution}")
+        captcha_api_key = os.getenv("CAPTCHA_API_KEY", "")
+        if not captcha_api_key:
+            _log("No CAPTCHA_API_KEY set, cannot solve Arkose")
             return False
 
-        _log(f"Arkose token received ({len(token)} chars)")
+        # Submit to 2captcha
+        submit_url = (
+            f"https://2captcha.com/in.php?key={captcha_api_key}&method=funcaptcha"
+            f"&publickey={public_key}"
+            f"&pageurl={page.url}"
+            f"&surl=https://gitlab-api.arkoselabs.com&json=1"
+        )
+        resp = _urllib_request.urlopen(submit_url, timeout=30)
+        result = json.loads(resp.read())
+
+        if result.get("status") != 1:
+            _log(f"2captcha submit failed: {result}")
+            return False
+
+        task_id = result["request"]
+        _log(f"2captcha task submitted: {task_id}, waiting for solution...")
+
+        # Poll for result (up to 120s)
+        import time as _time
+        for i in range(24):
+            await asyncio.sleep(5)
+            poll_url = f"https://2captcha.com/res.php?key={captcha_api_key}&action=get&id={task_id}&json=1"
+            poll_resp = _urllib_request.urlopen(poll_url, timeout=15)
+            poll_result = json.loads(poll_resp.read())
+
+            if poll_result.get("status") == 1:
+                token = poll_result["request"]
+                _log(f"Arkose solved! Token: {token[:60]}...")
+                break
+            elif "CAPCHA_NOT_READY" not in poll_result.get("request", ""):
+                _log(f"2captcha error: {poll_result}")
+                return False
+        else:
+            _log("2captcha timeout after 120s")
+            return False
 
         # Inject the token into the page
-        await page.evaluate("""(token) => {
+        inject_result = await page.evaluate("""(token) => {
             // Try hidden input
             const tokenInput = document.querySelector('input[name="arkose_labs_token"]') ||
                                document.querySelector('input[name="verification_token"]') ||
@@ -286,22 +313,20 @@ async def _solve_arkose_if_present(page: Any) -> bool:
                 window.arkoseCallback({token: token});
                 return 'callback';
             }
-            // Try enforcement object
-            if (window.myEnforcement && window.myEnforcement.setConfig) {
-                window.myEnforcement.setConfig({data: {token: token}});
-                return 'enforcement';
+            if (window.setupArkoseLabsChallenge) {
+                return 'setup_found';
             }
             // Dispatch event for any listeners
             document.dispatchEvent(new CustomEvent('arkose-complete', {detail: {token: token}}));
             return 'event';
         }""", token)
 
+        _log(f"Token injection method: {inject_result}")
         await asyncio.sleep(3)
-        _log("Arkose token injected")
         return True
 
     except Exception as e:
-        _log(f"Capsolver solve failed: {e}")
+        _log(f"Arkose solve failed: {e}")
         return False
 
 

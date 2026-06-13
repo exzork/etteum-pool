@@ -121,8 +121,12 @@ statsRouter.get("/requests", async (c) => {
   // Paginate
   const paginated = logs.slice(offset, offset + limit);
 
-  // Strip requestBody and responseBody for performance
-  const data = paginated.map(({ requestBody, responseBody, ...rest }) => rest);
+  // Strip requestBody and responseBody for performance, convert timestamps to ISO
+  const data = paginated.map(({ requestBody, responseBody, ...rest }) => ({
+    ...rest,
+    createdAt: rest.createdAt ? new Date(Number(rest.createdAt)).toISOString() : null,
+    lastUsedAt: (rest as any).lastUsedAt ? new Date(Number((rest as any).lastUsedAt)).toISOString() : null,
+  }));
 
   return c.json({ data, limit, offset });
 });
@@ -134,7 +138,10 @@ statsRouter.get("/requests/:id", async (c) => {
   const id = BigInt(c.req.param("id"));
   const log = db.requestLogs.findById(id);
   if (!log) return c.json({ error: "Request log not found" }, 404);
-  return c.json({ data: log });
+  return c.json({ data: {
+    ...log,
+    createdAt: log.createdAt ? new Date(Number(log.createdAt)).toISOString() : null,
+  } });
 });
 
 /**

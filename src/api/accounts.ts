@@ -43,11 +43,16 @@ accountsRouter.get("/warmup-queue", (c) => {
 accountsRouter.get("/", async (c) => {
   const allAccounts = db.accounts.getAll();
 
-  // Don't expose passwords in response
+  // Don't expose passwords in response, convert timestamps to ISO
   const sanitized = allAccounts.map((acc) => ({
     ...acc,
     password: "***",
     tokens: acc.tokens ? "[set]" : undefined,
+    createdAt: acc.createdAt ? new Date(Number(acc.createdAt)).toISOString() : null,
+    updatedAt: acc.updatedAt ? new Date(Number(acc.updatedAt)).toISOString() : null,
+    lastUsedAt: acc.lastUsedAt ? new Date(Number(acc.lastUsedAt)).toISOString() : null,
+    lastLoginAt: acc.lastLoginAt ? new Date(Number(acc.lastLoginAt)).toISOString() : null,
+    quotaResetAt: acc.quotaResetAt ? new Date(Number(acc.quotaResetAt)).toISOString() : null,
   }));
 
   return c.json({ data: sanitized, total: sanitized.length });

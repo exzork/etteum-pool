@@ -3,6 +3,12 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { config } from "./config";
 import { initStdb, db, call } from "./db/index";
+
+// BigInt JSON serialization — SpacetimeDB uses bigint for IDs/timestamps
+// Convert to Number for JSON (safe for IDs < 2^53)
+(BigInt.prototype as any).toJSON = function () {
+  return Number(this);
+};
 import { apiRouter } from "./api/index";
 import { authRouter } from "./auth/index";
 import { proxyRouter } from "./proxy/index";

@@ -257,6 +257,8 @@ function wrapStreamWithUsageFinalizer(
     fallbackTotalTokens: number;
     fallbackCreditsUsed: number;
     fallbackCreditSource: CreditSource;
+    apiKeyId?: number | null;
+    apiKeyName?: string | null;
   }
 ): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
@@ -397,6 +399,8 @@ function wrapStreamWithUsageFinalizer(
             durationMs,
             accountQuotaBefore: context.quotaBefore,
             accountQuotaAfter: quotaAfter,
+            apiKeyId: context.apiKeyId,
+            apiKeyName: context.apiKeyName,
             createdAt: new Date(context.startedAt).toISOString(),
             requestBody: prepareLogBody({
               model: context.model,
@@ -545,6 +549,8 @@ async function handleChatCompletion(body: ChatCompletionRequest, apiKey?: Resolv
       fallbackTotalTokens: totalTokens,
       fallbackCreditsUsed: creditsUsed,
       fallbackCreditSource: creditSource,
+      apiKeyId: apiKey?.id || null,
+      apiKeyName: apiKey?.name || null,
     });
 
       shouldReleaseTracking = false;

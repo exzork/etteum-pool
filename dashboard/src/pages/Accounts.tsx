@@ -11,7 +11,7 @@ import {
   DialogTitle as DTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
-import { Plus, Upload, RefreshCw, Play, RotateCcw, Flame, ChevronDown, Loader2, Key, Pencil, Trash2, Zap, FlaskConical, Lock, Shield } from "lucide-react";
+import { Plus, Upload, RefreshCw, Play, RotateCcw, Flame, ChevronDown, Loader2, Key, Pencil, Trash2, Zap, FlaskConical, Lock, Shield, XCircle } from "lucide-react";
 import { Progress } from "@/components/ui/progress";
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
 import { useWsEvent } from "@/hooks/useWebSocket";
@@ -38,6 +38,8 @@ import {
   updateByokProvider,
   updateSettings,
   warmupAllAccounts,
+  deleteExhaustedAccounts,
+  deleteErroredAccounts,
   type AutoWarmupStatus,
   type ByokProvider,
 } from "@/lib/api";
@@ -901,6 +903,14 @@ export default function Accounts() {
                 </Button>
                 <Button className="w-full" variant="outline" size="sm" onClick={() => handleRetryErrors(stat.provider)} disabled={stat.error === 0}>
                   <RotateCcw className="mr-1 h-4 w-4" /> Retry
+                </Button>
+              </div>
+              <div className="grid grid-cols-2 gap-2" onClick={(e) => e.stopPropagation()}>
+                <Button className="w-full" variant="destructive" size="sm" disabled={stat.exhausted === 0} onClick={async () => { if (confirm(`Delete all ${stat.exhausted} exhausted ${labelProvider(stat.provider)} accounts?`)) { await deleteExhaustedAccounts(stat.provider); load(); } }}>
+                  <Trash2 className="mr-1 h-3 w-3" /> Exhausted ({stat.exhausted})
+                </Button>
+                <Button className="w-full" variant="destructive" size="sm" disabled={stat.error === 0} onClick={async () => { if (confirm(`Delete all ${stat.error} errored ${labelProvider(stat.provider)} accounts?`)) { await deleteErroredAccounts(stat.provider); load(); } }}>
+                  <XCircle className="mr-1 h-3 w-3" /> Errored ({stat.error})
                 </Button>
               </div>
             </CardContent>

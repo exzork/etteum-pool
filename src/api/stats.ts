@@ -280,10 +280,56 @@ statsRouter.get("/providers", async (c) => {
 });
 
 /**
- * GET /api/stats/models - Get per-model statistics (from usage_summary)
- * Supports optional ?hours=N&range=all to filter by time period
- * Supports optional ?apiKeyId=N to filter by API key
+ * DELETE /api/stats/requests - Wipe all request logs and usage summary
  */
+statsRouter.delete("/requests", async (c) => {
+  await db.delete(requestLogs);
+  await db.delete(usageSummary);
+  return c.json({ success: true, message: "All request logs and usage data cleared" });
+});
+
+/**
+ * DELETE /api/stats/accounts/exhausted - Delete all exhausted accounts, optionally filtered by provider
+ * ?provider=codebuddy
+ */
+statsRouter.delete("/accounts/exhausted", async (c) => {
+  const provider = c.req.query("provider");
+  const conditions = [eq(accounts.status, "exhausted")];
+  if (provider) conditions.push(eq(accounts.provider, provider));
+
+  // Nullify foreign key references first
+  const exhausted = await db.select({ id: accounts.id }).from(accounts).where(and(...conditions));
+  for (const acc of exhausted) {
+    await db.update(requestLogs).set({ accountId: null }).where(eq(requestLogs.accountId, acc.id));
+  }
+
+  const deleted = await db.delete(accounts).where(and(...conditions)).returning();
+  pool.invalidate(provider as any);
+
+  return c.json({ success: true, deleted: deleted.length, provider: provider || "all" });
+});
+
+/**
+ * DELETE /api/stats/accounts/errored - Delete all errored accounts, optionally filtered by provider
+ * ?provider=codebuddy
+ */
+statsRouter.delete("/accounts/errored", async (c) => {
+  const provider = c.req.query("provider");
+  const conditions = [eq(accounts.status, "error")];
+  if (provider) conditions.push(eq(accounts.provider, provider));
+
+  // Nullify foreign key references first
+  const errored = await db.select({ id: accounts.id }).from(accounts).where(and(...conditions));
+  for (const acc of errored) {
+    await db.update(requestLogs).set({ accountId: null }).where(eq(requestLogs.accountId, acc.id));
+  }
+
+  const deleted = await db.delete(accounts).where(and(...conditions)).returning();
+  pool.invalidate(provider as any);
+
+  return c.json({ success: true, deleted: deleted.length, provider: provider || "all" });
+});
+
 statsRouter.get("/models", async (c) => {
   const range = c.req.query("range");
   const hours = c.req.query("hours") ? clampNumber(c.req.query("hours"), 24, 1, 24 * 365) : null;

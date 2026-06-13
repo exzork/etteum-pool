@@ -221,6 +221,20 @@ export async function fetchRequests(page: number = 1, limit: number = 50, provid
   return fetchApi(`/api/stats/requests?${params.toString()}`);
 }
 
+export async function wipeRequestLogs() {
+  return fetchApi("/api/stats/requests", { method: "DELETE" });
+}
+
+export async function deleteExhaustedAccounts(provider?: string) {
+  const params = provider ? `?provider=${provider}` : "";
+  return fetchApi(`/api/stats/accounts/exhausted${params}`, { method: "DELETE" });
+}
+
+export async function deleteErroredAccounts(provider?: string) {
+  const params = provider ? `?provider=${provider}` : "";
+  return fetchApi(`/api/stats/accounts/errored${params}`, { method: "DELETE" });
+}
+
 export async function fetchModels() {
   return fetchApi("/v1/models");
 }

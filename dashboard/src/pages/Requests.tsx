@@ -2,9 +2,9 @@ import { useEffect, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { Search, RefreshCw } from "lucide-react";
+import { Search, RefreshCw, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { fetchRequests, fetchAllApiKeys, type ApiKeyEntry } from "@/lib/api";
+import { fetchRequests, fetchAllApiKeys, wipeRequestLogs, type ApiKeyEntry } from "@/lib/api";
 import { formatDateTimeID } from "@/lib/utils";
 import { useWsEvent } from "@/hooks/useWebSocket";
 
@@ -101,9 +101,14 @@ export default function Requests() {
             Recent API request logs
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={load} disabled={loading}>
-          <RefreshCw className="w-4 h-4 mr-2" /> Refresh
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="destructive" size="sm" onClick={async () => { if (confirm("Wipe ALL request logs and usage data?")) { await wipeRequestLogs(); load(); } }}>
+            <Trash2 className="w-4 h-4 mr-2" /> Wipe Logs
+          </Button>
+          <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+            <RefreshCw className="w-4 h-4 mr-2" /> Refresh
+          </Button>
+        </div>
       </div>
 
       <div className="flex flex-col gap-3 sm:flex-row">

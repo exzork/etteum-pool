@@ -5,6 +5,7 @@ import { CanvaProvider } from "./canva";
 import { CodexProvider } from "./codex";
 import { QoderProvider } from "./qoder";
 import { ByokProvider } from "./byok";
+import { GitLabDuoProvider } from "./gitlab-duo";
 
 /**
  * Single source of truth for the provider set.
@@ -28,12 +29,13 @@ const canva = new CanvaProvider();
 const codex = new CodexProvider();
 const qoder = new QoderProvider();
 const byok = new ByokProvider();
+const gitlabDuo = new GitLabDuoProvider();
 
 // Priority order. canva/qoder/codex/kiro-pro have unique prefixes; codex is
 // listed before codebuddy so the literal "gpt-5-codex" resolves to codex while
 // codebuddy keeps its own "gpt-5*"/"gpt-5.x-codex" models. byok checks dynamic
 // prefixes from DB accounts. kiro is the fallback.
-const PROVIDER_ORDER = [canva, qoder, codex, kiroPro, byok, codebuddy, kiro] as const;
+const PROVIDER_ORDER = [canva, qoder, codex, gitlabDuo, kiroPro, byok, codebuddy, kiro] as const;
 
 export const providers = {
   kiro,
@@ -43,6 +45,7 @@ export const providers = {
   codex,
   qoder,
   byok,
+  "gitlab-duo": gitlabDuo,
 } as const;
 
 export type ProviderName = keyof typeof providers;

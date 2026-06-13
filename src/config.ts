@@ -38,8 +38,8 @@ export const config = {
   browserEngine: process.env.BROWSER_ENGINE || "camoufox",
   captchaService: process.env.CAPTCHA_SERVICE || "none",
   captchaApiKey: process.env.CAPTCHA_API_KEY || "",
-  // Providers: kiro, kiro-pro, codebuddy, canva, codex, qoder
-  providers: ["kiro", "kiro-pro", "codebuddy", "canva", "codex", "qoder"] as const,
+  // Providers: kiro, kiro-pro, codebuddy, canva, codex, qoder, gitlab-duo
+  providers: ["kiro", "kiro-pro", "codebuddy", "canva", "codex", "qoder", "gitlab-duo"] as const,
 } as const;
 
 export type Config = typeof config;

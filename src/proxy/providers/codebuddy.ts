@@ -59,8 +59,14 @@ interface CodeBuddyTokens {
 const CB_MODEL_MAP: Record<string, string> = {
   // Claude
   "cb-opus-4.6": "claude-opus-4.6",
+  // We deliberately map the bare 4.7 alias to the 1m-context variant — the user
+  // (eko) uses cb-opus-4.7 as their main model and wants the larger context by
+  // default. Upstream (priyo000) maps it to plain "claude-opus-4.7"; we keep
+  // their explicit "cb-opus-4.7-1m" alias too so both names resolve correctly.
   "cb-opus-4.7": "claude-opus-4.7-1m",
+  "cb-opus-4.7-1m": "claude-opus-4.7-1m",
   "cb-opus-4.8": "claude-opus-4.8",
+  "cb-opus-4.8-1m": "claude-opus-4.8-1m",
   "cb-sonnet-4.6": "claude-sonnet-4.6",
   "cb-haiku-4.5": "claude-haiku-4.5",
   // GPT
@@ -73,6 +79,7 @@ const CB_MODEL_MAP: Record<string, string> = {
   "cb-gpt-5.3-codex": "gpt-5.3-codex",
   "cb-gpt-5.4": "gpt-5.4",
   "cb-gpt-5.5": "gpt-5.5",
+  "cb-gpt-5.5-xhigh": "gpt-5.5-xhigh",
   // Gemini
   "cb-gemini-2.5-flash": "gemini-2.5-flash",
   "cb-gemini-2.5-pro": "gemini-2.5-pro",
@@ -124,7 +131,9 @@ export class CodeBuddyProvider extends BaseProvider {
 
     // All models exposed with cb- prefix only
     { id: "cb-opus-4.8", object: "model", created: Date.now(), owned_by: "codebuddy", context_window: 1000000, max_output: 64000, thinking: true, vision: true, creditUnit: "token", creditRate: 0.027 / 1000, creditSource: "estimated" },
+    { id: "cb-opus-4.8-1m", object: "model", created: Date.now(), owned_by: "codebuddy", context_window: 1000000, max_output: 64000, thinking: true, vision: true, creditUnit: "token", creditRate: 0.030 / 1000, creditSource: "estimated" },
     { id: "cb-opus-4.7", object: "model", created: Date.now(), owned_by: "codebuddy", context_window: 1000000, max_output: 64000, thinking: true, vision: true, creditUnit: "token", creditRate: 0.027 / 1000, creditSource: "estimated" },
+    { id: "cb-opus-4.7-1m", object: "model", created: Date.now(), owned_by: "codebuddy", context_window: 1000000, max_output: 64000, thinking: true, vision: true, creditUnit: "token", creditRate: 0.030 / 1000, creditSource: "estimated" },
     { id: "cb-opus-4.6", object: "model", created: Date.now(), owned_by: "codebuddy", context_window: 1000000, max_output: 64000, thinking: true, vision: true, creditUnit: "token", creditRate: 0.027 / 1000, creditSource: "estimated" },
     { id: "cb-sonnet-4.6", object: "model", created: Date.now(), owned_by: "codebuddy", context_window: 200000, max_output: 64000, thinking: true, vision: true, creditUnit: "token", creditRate: 0.015 / 1000, creditSource: "estimated" },
     { id: "cb-haiku-4.5", object: "model", created: Date.now(), owned_by: "codebuddy", context_window: 200000, max_output: 8192, thinking: true, vision: true, creditUnit: "token", creditRate: 0.005 / 1000, creditSource: "estimated" },
@@ -137,6 +146,7 @@ export class CodeBuddyProvider extends BaseProvider {
     { id: "cb-gpt-5.3-codex", object: "model", created: Date.now(), owned_by: "codebuddy", thinking: true, vision: true, creditUnit: "token", creditRate: 0.013 / 1000, creditSource: "estimated" },
     { id: "cb-gpt-5.4", object: "model", created: Date.now(), owned_by: "codebuddy", thinking: true, vision: true, creditUnit: "token", creditRate: 0.018 / 1000, creditSource: "estimated" },
     { id: "cb-gpt-5.5", object: "model", created: Date.now(), owned_by: "codebuddy", thinking: true, vision: true, creditUnit: "token", creditRate: 0.035 / 1000, creditSource: "estimated" },
+    { id: "cb-gpt-5.5-xhigh", object: "model", created: Date.now(), owned_by: "codebuddy", thinking: true, vision: true, creditUnit: "token", creditRate: 0.045 / 1000, creditSource: "estimated" },
     { id: "cb-gemini-2.5-flash", object: "model", created: Date.now(), owned_by: "codebuddy", thinking: true, vision: true, creditUnit: "token", creditRate: 0.003 / 1000, creditSource: "estimated" },
     { id: "cb-gemini-2.5-pro", object: "model", created: Date.now(), owned_by: "codebuddy", thinking: true, vision: true, creditUnit: "token", creditRate: 0.012 / 1000, creditSource: "estimated" },
     { id: "cb-gemini-3.0-flash", object: "model", created: Date.now(), owned_by: "codebuddy", thinking: false, vision: true, creditUnit: "token", creditRate: 0.004 / 1000, creditSource: "estimated" },

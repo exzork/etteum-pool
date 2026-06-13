@@ -12,17 +12,18 @@ import { clearChangelog } from "../db/change-tracker";
 
 /**
  * Extract full sync-able state from local DB.
- * Excludes large transient data (request_logs, usage_summary) from full sync —
- * those are synced incrementally via deltas only.
+ * Includes usage_summary for metrics sync.
+ * Excludes request_logs (large transient data synced via deltas only).
  */
 export async function extractFullState(): Promise<SyncFullData> {
-  const [accs, keys, sets, filters, mappings, proxies] = await Promise.all([
+  const [accs, keys, sets, filters, mappings, proxies, usage] = await Promise.all([
     db.select().from(accounts),
     db.select().from(apiKeys),
     db.select().from(settings),
     db.select().from(filterRules),
     db.select().from(modelMappings),
     db.select().from(proxyPool),
+    db.select().from(usageSummary),
   ]);
 
   return {
@@ -32,6 +33,7 @@ export async function extractFullState(): Promise<SyncFullData> {
     filterRules: filters as Record<string, unknown>[],
     modelMappings: mappings as Record<string, unknown>[],
     proxyPool: proxies as Record<string, unknown>[],
+    usageSummary: usage as Record<string, unknown>[],
   };
 }
 
@@ -182,6 +184,35 @@ export async function applyFullState(data: SyncFullData, remoteNodeId: string): 
     }
   }
 
+  // Usage summary: last-write-wins
+  for (const row of data.usageSummary || []) {
+    try {
+      const r = row as any;
+      client.exec(`
+        INSERT INTO usage_summary (bucket, provider, model, api_key_id, api_key_name, total_requests, success_requests, error_requests, prompt_tokens, completion_tokens, total_tokens, credits_used, total_duration_ms)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (bucket, provider, model, api_key_id) DO UPDATE SET
+          api_key_name = excluded.api_key_name,
+          total_requests = CASE WHEN excluded.total_requests > usage_summary.total_requests THEN excluded.total_requests ELSE usage_summary.total_requests END,
+          success_requests = CASE WHEN excluded.success_requests > usage_summary.success_requests THEN excluded.success_requests ELSE usage_summary.success_requests END,
+          error_requests = CASE WHEN excluded.error_requests > usage_summary.error_requests THEN excluded.error_requests ELSE usage_summary.error_requests END,
+          prompt_tokens = CASE WHEN excluded.prompt_tokens > usage_summary.prompt_tokens THEN excluded.prompt_tokens ELSE usage_summary.prompt_tokens END,
+          completion_tokens = CASE WHEN excluded.completion_tokens > usage_summary.completion_tokens THEN excluded.completion_tokens ELSE usage_summary.completion_tokens END,
+          total_tokens = CASE WHEN excluded.total_tokens > usage_summary.total_tokens THEN excluded.total_tokens ELSE usage_summary.total_tokens END,
+          credits_used = CASE WHEN excluded.credits_used > usage_summary.credits_used THEN excluded.credits_used ELSE usage_summary.credits_used END,
+          total_duration_ms = CASE WHEN excluded.total_duration_ms > usage_summary.total_duration_ms THEN excluded.total_duration_ms ELSE usage_summary.total_duration_ms END
+      `, [
+        r.bucket, r.provider, r.model, r.apiKeyId || 0, r.apiKeyName,
+        r.totalRequests, r.successRequests, r.errorRequests,
+        r.promptTokens, r.completionTokens, r.totalTokens,
+        r.creditsUsed, r.totalDurationMs,
+      ]);
+      applied++;
+    } catch (e) {
+      console.error(`[Sync] Failed to apply usage_summary:`, e);
+    }
+  }
+
   console.log(`[Sync] Applied ${applied} rows from node ${remoteNodeId}`);
   clearChangelog(); // Prevent echo-back of remote state
   setSuppressEmit(false);
@@ -318,19 +349,21 @@ function applyUpsert(table: SyncTable, row: Record<string, unknown>): boolean {
 
     case "usage_summary": {
       const r = row as any;
-      // Usage summary: additive merge on conflict
+      // Usage summary: last-write-wins (replace with current state from remote node).
+      // The change tracker sends the full accumulated row, not increments.
       client.exec(`
         INSERT INTO usage_summary (bucket, provider, model, api_key_id, api_key_name, total_requests, success_requests, error_requests, prompt_tokens, completion_tokens, total_tokens, credits_used, total_duration_ms)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (bucket, provider, model, api_key_id) DO UPDATE SET
-          total_requests = usage_summary.total_requests + excluded.total_requests,
-          success_requests = usage_summary.success_requests + excluded.success_requests,
-          error_requests = usage_summary.error_requests + excluded.error_requests,
-          prompt_tokens = usage_summary.prompt_tokens + excluded.prompt_tokens,
-          completion_tokens = usage_summary.completion_tokens + excluded.completion_tokens,
-          total_tokens = usage_summary.total_tokens + excluded.total_tokens,
-          credits_used = usage_summary.credits_used + excluded.credits_used,
-          total_duration_ms = usage_summary.total_duration_ms + excluded.total_duration_ms
+          api_key_name = excluded.api_key_name,
+          total_requests = excluded.total_requests,
+          success_requests = excluded.success_requests,
+          error_requests = excluded.error_requests,
+          prompt_tokens = excluded.prompt_tokens,
+          completion_tokens = excluded.completion_tokens,
+          total_tokens = excluded.total_tokens,
+          credits_used = excluded.credits_used,
+          total_duration_ms = excluded.total_duration_ms
       `, [
         r.bucket, r.provider, r.model, r.apiKeyId, r.apiKeyName,
         r.totalRequests, r.successRequests, r.errorRequests,

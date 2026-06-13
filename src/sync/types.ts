@@ -67,6 +67,7 @@ export interface SyncFullData {
   filterRules: Record<string, unknown>[];
   modelMappings: Record<string, unknown>[];
   proxyPool: Record<string, unknown>[];
+  usageSummary?: Record<string, unknown>[];
 }
 
 export interface SyncNodeInfo {

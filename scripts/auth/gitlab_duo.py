@@ -140,8 +140,16 @@ async def _wait_for_cloudflare(page: Any, timeout_s: int = 30) -> bool:
     """Wait for Cloudflare challenge to resolve. Returns True if passed."""
     for i in range(timeout_s // 2):
         # Check if we already have the real page
-        login_field = await page.query_selector('#user_login, input[name="user[login]"], #new_user_username')
+        login_field = await page.query_selector('#user_login, input[name="user[login]"], #new_user_username, #identifierId')
         if login_field:
+            return True
+
+        # Check if URL changed away from challenge
+        title = await page.title()
+        cf_titles = ["just a moment", "un momento", "tunggu sebentar", "трохи зачекайте", "einen moment", "verificación"]
+        if not any(t in title.lower() for t in cf_titles):
+            # Title doesn't look like CF anymore
+            await asyncio.sleep(1)
             return True
 
         # Try to find and click the turnstile iframe checkbox
@@ -157,6 +165,17 @@ async def _wait_for_cloudflare(page: Any, timeout_s: int = 30) -> bool:
                     await cf_frame.click('body')
             except Exception:
                 pass
+
+        # Also try clicking turnstile widget directly on the page (non-iframe rendering)
+        try:
+            turnstile_widget = await page.query_selector('.cf-turnstile iframe, iframe[src*="turnstile"]')
+            if turnstile_widget:
+                box = await turnstile_widget.bounding_box()
+                if box:
+                    # Click in the left portion where the checkbox is
+                    await page.mouse.click(box['x'] + 25, box['y'] + box['height'] / 2)
+        except Exception:
+            pass
 
         await asyncio.sleep(2)
 
@@ -191,6 +210,70 @@ async def _verify_email_via_gmail(page: Any, email: str, password: str) -> dict[
     Returns: {"success": True} or {"success": False, "error": "..."}
     """
     _log("Verifying email via Gmail...")
+    return await _gmail_get_gitlab_code_or_link(page, email, password, mode="link")
+
+
+async def _verify_identity_code(page: Any, email: str, password: str) -> dict[str, Any]:
+    """
+    Handle GitLab identity verification: get code from Gmail and enter it.
+    The page should currently be on /users/identity_verification.
+    """
+    _log("Handling identity verification code...")
+
+    # Save the current verification page URL
+    verify_url = page.url
+
+    # Get the verification code from Gmail
+    result = await _gmail_get_gitlab_code_or_link(page, email, password, mode="code")
+    if not result["success"]:
+        return result
+
+    code = result.get("code", "")
+    if not code:
+        return {"success": False, "error": "No verification code found in Gmail"}
+
+    _log(f"Got verification code: {code}")
+
+    # Navigate back to GitLab verification page
+    await page.goto(verify_url, timeout=NAV_TIMEOUT)
+    await asyncio.sleep(3)
+    await _wait_for_cloudflare(page, timeout_s=20)
+
+    # Enter the code
+    try:
+        code_input = await page.wait_for_selector(
+            'input[name*="verification_code"], input[name*="code"], input[type="text"][maxlength="6"], input[data-testid*="code"]',
+            timeout=15000
+        )
+        await code_input.click()
+        await asyncio.sleep(0.3)
+        await page.keyboard.type(code, delay=50)
+        await asyncio.sleep(1)
+
+        # Submit
+        submit_btn = await page.query_selector('button[type="submit"], input[type="submit"], button:has-text("Verify")')
+        if submit_btn:
+            await submit_btn.click()
+            await asyncio.sleep(5)
+
+        # Check result
+        current_url = page.url
+        if "identity_verification" not in current_url:
+            _log("Identity verification successful!")
+            return {"success": True}
+        else:
+            return {"success": False, "error": "Verification code was not accepted"}
+    except Exception as e:
+        return {"success": False, "error": f"Failed to enter verification code: {e}"}
+
+
+async def _gmail_get_gitlab_code_or_link(page: Any, email: str, password: str, mode: str = "code") -> dict[str, Any]:
+    """
+    Log into Gmail and find GitLab verification code or confirmation link.
+    mode="code": returns {"success": True, "code": "123456"}
+    mode="link": navigates to the confirmation link and returns {"success": True}
+    """
+    _log("Verifying email via Gmail...")
 
     # Navigate to Google sign-in
     await page.goto(
@@ -221,7 +304,18 @@ async def _verify_email_via_gmail(page: Any, email: str, password: str) -> dict[
 
     # Fill password
     try:
-        pass_input = await page.wait_for_selector('input[type="password"], input[name="Passwd"]', timeout=15000)
+        # Wait for visible password input (Gmail has hidden ones too)
+        pass_input = await page.wait_for_selector('input[type="password"][name="Passwd"], input[type="password"]:not([aria-hidden="true"]):not([tabindex="-1"])', timeout=15000)
+        if not await pass_input.is_visible():
+            # Fallback: find the visible one manually
+            all_pass = await page.query_selector_all('input[type="password"]')
+            pass_input = None
+            for p in all_pass:
+                if await p.is_visible():
+                    pass_input = p
+                    break
+        if not pass_input:
+            return {"success": False, "error": "Gmail: no visible password field found"}
         await pass_input.click()
         await asyncio.sleep(0.3)
         await page.keyboard.type(password, delay=random.randint(30, 60))
@@ -244,6 +338,16 @@ async def _verify_email_via_gmail(page: Any, email: str, password: str) -> dict[
     _log("Gmail inbox reached, searching for GitLab confirmation email...")
     await asyncio.sleep(3)
 
+    # Dismiss any Gmail welcome/onboarding modals
+    for dismiss_sel in ['button:has-text("Get started")', 'button:has-text("Got it")', 'button:has-text("No thanks")', 'button[aria-label="Close"]']:
+        try:
+            btn = await page.query_selector(dismiss_sel)
+            if btn and await btn.is_visible():
+                await btn.click()
+                await asyncio.sleep(1)
+        except Exception:
+            pass
+
     # Navigate directly to Gmail search for GitLab confirmation emails
     await page.goto(
         "https://mail.google.com/mail/u/0/#search/from%3Agitlab+confirm+your+email",
@@ -265,22 +369,36 @@ async def _verify_email_via_gmail(page: Any, email: str, password: str) -> dict[
 
         # First try: click any visible email row (Gmail uses various structures)
         try:
-            # Click the first email in the list using generic table row
+            # Click the first VISIBLE email in the list
             clicked = False
-            for selector in ['table.F tr', 'div[role="main"] tr', 'tbody tr']:
+            for selector in ['table.F cf.wT tr', 'div[role="main"] table tr.zA', 'div[role="main"] tbody tr', 'table tbody tr']:
                 rows = await page.query_selector_all(selector)
-                if rows:
-                    await rows[0].click()
-                    await asyncio.sleep(4)
-                    clicked = True
-                    _log("Clicked first email row")
+                for row in rows[:5]:
+                    if await row.is_visible():
+                        await row.click()
+                        await asyncio.sleep(4)
+                        clicked = True
+                        _log("Clicked email row")
+                        break
+                if clicked:
                     break
 
             if not clicked:
                 continue
 
-            # Now we should be inside the email - look for confirmation link
+            # Now we should be inside the email - look for confirmation link or code
             content = await page.content()
+
+            # Mode "code": look for 6-digit verification code
+            if mode == "code":
+                codes = _re.findall(r'\b(\d{6})\b', content)
+                # Filter out common non-code numbers (years, etc)
+                codes = [c for c in codes if not c.startswith("20") and c != "000000"]
+                if codes:
+                    _log(f"Found verification code: {codes[0]}")
+                    return {"success": True, "code": codes[0]}
+
+            # Mode "link": look for confirmation link
             # GitLab confirmation links look like:
             # https://gitlab.com/users/confirmation?confirmation_token=XXXXX
             links = _re.findall(
@@ -288,17 +406,21 @@ async def _verify_email_via_gmail(page: Any, email: str, password: str) -> dict[
                 content
             )
             if links:
-                confirm_url = links[0]
-                _log(f"Found confirmation link: {confirm_url[:80]}...")
-                await page.goto(confirm_url, timeout=NAV_TIMEOUT)
-                await asyncio.sleep(3)
-                await _wait_for_cloudflare(page, timeout_s=15)
-                _log("Email confirmed!")
-                return {"success": True}
+                if mode == "link":
+                    confirm_url = links[0]
+                    _log(f"Found confirmation link: {confirm_url[:80]}...")
+                    await page.goto(confirm_url, timeout=NAV_TIMEOUT)
+                    await asyncio.sleep(3)
+                    await _wait_for_cloudflare(page, timeout_s=15)
+                    _log("Email confirmed!")
+                    return {"success": True}
+                else:
+                    # For code mode, the link itself might contain what we need
+                    pass
 
             # Also try finding a clickable "Confirm your account" button/link
             confirm_btn = await page.query_selector('a:has-text("Confirm your account"), a:has-text("Confirm your email")')
-            if confirm_btn:
+            if confirm_btn and mode == "link":
                 href = await confirm_btn.get_attribute("href")
                 if href and "confirmation" in href:
                     _log(f"Found confirm button with href: {href[:80]}...")
@@ -358,163 +480,180 @@ async def _check_already_registered(page: Any) -> bool:
 
 async def _signup(page: Any, email: str, password: str) -> dict[str, Any]:
     """
-    Perform GitLab signup.
-    Returns: {"success": True} or {"success": False, "error": "...", "needs_verification": bool}
+    Perform GitLab signup via Google OAuth.
+    This skips email verification entirely since Google verifies the email.
+    Returns: {"success": True} or {"success": False, "error": "..."}
     """
-    username = _derive_username(email)
-    _log(f"Signing up with username: {username}")
+    _log("Signing up via Google OAuth...")
 
-    # Navigate to signup page
-    await page.goto(GITLAB_SIGNUP_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+    # Navigate to GitLab sign-in page (has Google OAuth button)
+    await page.goto(GITLAB_SIGNIN_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
     await asyncio.sleep(2)
 
-    # Check for rate limiting
-    if await _check_rate_limit(page):
-        return {"success": False, "error": "Rate limited on signup page", "rate_limited": True}
+    # Wait for Cloudflare
+    cf_passed = await _wait_for_cloudflare(page, timeout_s=30)
+    if not cf_passed:
+        return {"success": False, "error": "Cloudflare challenge did not resolve on sign-in page"}
 
-    # Fill in the registration form
-    # GitLab signup form fields
-    form_fields = [
-        ("#new_user_first_name", "User"),
-        ("#new_user_last_name", "Test"),
-        ("#new_user_username", username),
-        ("#new_user_email", email),
-        ("#new_user_password", password),
-    ]
+    # Click "Sign up" link to go to registration, or find Google button directly
+    # GitLab sign-in page has OAuth buttons at the bottom
+    google_btn = await page.query_selector(
+        'a[href*="google_oauth2"], '
+        'button:has-text("Google"), '
+        'a:has-text("Google"), '
+        'span:has-text("Google")'
+    )
 
-    for selector, value in form_fields:
-        try:
-            await page.wait_for_selector(selector, state="visible", timeout=10000)
-            await _type_slowly(page, selector, value, delay=random.randint(30, 70))
-            await asyncio.sleep(random.uniform(0.3, 0.8))
-        except Exception as exc:
-            _log(f"Failed to fill field {selector}: {exc}")
-            # Try alternative selectors
-            alt_selectors = {
-                "#new_user_first_name": ['input[name="user[first_name]"]', 'input[data-testid="new-user-first-name-field"]'],
-                "#new_user_last_name": ['input[name="user[last_name]"]', 'input[data-testid="new-user-last-name-field"]'],
-                "#new_user_username": ['input[name="user[username]"]', 'input[data-testid="new-user-username-field"]'],
-                "#new_user_email": ['input[name="user[email]"]', 'input[data-testid="new-user-email-field"]'],
-                "#new_user_password": ['input[name="user[password]"]', 'input[data-testid="new-user-password-field"]'],
-            }
-            filled = False
-            for alt_sel in alt_selectors.get(selector, []):
-                try:
-                    count = await page.locator(alt_sel).count()
-                    if count > 0:
-                        await _type_slowly(page, alt_sel, value, delay=random.randint(30, 70))
-                        filled = True
-                        break
-                except Exception:
-                    continue
-            if not filled:
-                return {"success": False, "error": f"Could not fill signup field: {selector}"}
+    if not google_btn:
+        # Try the register page which also has OAuth
+        await page.goto(GITLAB_SIGNUP_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+        await asyncio.sleep(2)
+        await _wait_for_cloudflare(page, timeout_s=20)
+        google_btn = await page.query_selector(
+            'a[href*="google_oauth2"], '
+            'button:has-text("Google"), '
+            'a:has-text("Google"), '
+            'span:has-text("Google")'
+        )
 
-    await asyncio.sleep(1)
+    if not google_btn:
+        return {"success": False, "error": "Could not find Google OAuth button on GitLab"}
 
-    # Check for CAPTCHA before submitting
-    if await _check_captcha(page):
-        _log("WARNING: CAPTCHA detected on signup form")
-        return {"success": False, "error": "CAPTCHA detected - cannot solve automatically", "captcha": True}
+    _log("Clicking Google OAuth button...")
+    await google_btn.click()
+    await asyncio.sleep(5)
 
-    # Submit the form
-    submit_selectors = [
-        'button[data-testid="new-user-register-button"]',
-        'input[type="submit"][name="commit"]',
-        'button[type="submit"]',
-        '#new_user button[type="submit"]',
-        'input[value="Register"]',
-    ]
-
-    submitted = False
-    for sel in submit_selectors:
-        try:
-            count = await page.locator(sel).count()
-            if count > 0:
-                await page.locator(sel).first.click()
-                submitted = True
-                _log(f"Clicked submit button: {sel}")
-                break
-        except Exception:
-            continue
-
-    if not submitted:
-        # Try pressing Enter on the password field as fallback
-        try:
-            await page.locator("#new_user_password").first.press("Enter")
-            submitted = True
-            _log("Submitted form via Enter key")
-        except Exception:
-            return {"success": False, "error": "Could not find or click submit button"}
-
-    # Wait for response
-    await asyncio.sleep(3)
-
-    # Check for errors
-    if await _check_already_registered(page):
-        return {"success": False, "error": "Email already registered", "already_registered": True}
-
-    if await _check_rate_limit(page):
-        return {"success": False, "error": "Rate limited after signup submission", "rate_limited": True}
-
-    if await _check_captcha(page):
-        return {"success": False, "error": "CAPTCHA appeared after submission", "captcha": True}
-
-    # Check for error messages on the page
+    # Now we're on Google's OAuth consent/login page
+    # Fill Google email
     try:
-        error_selectors = [
-            ".flash-alert",
-            ".alert-danger",
-            "#error_explanation",
-            ".gl-alert-danger",
-            '[data-testid="alert-danger"]',
-        ]
-        for err_sel in error_selectors:
-            count = await page.locator(err_sel).count()
-            if count > 0:
-                error_text = await page.locator(err_sel).first.inner_text()
-                if error_text.strip():
-                    _log(f"Signup error: {error_text.strip()}")
-                    return {"success": False, "error": f"Signup error: {error_text.strip()}"}
+        email_input = await page.wait_for_selector(
+            '#identifierId, input[type="email"]', timeout=15000
+        )
+        await email_input.click()
+        await asyncio.sleep(0.3)
+        await page.keyboard.type(email, delay=random.randint(30, 60))
+        await asyncio.sleep(1)
+
+        # Click Next
+        next_btn = await page.query_selector('#identifierNext button, #identifierNext')
+        if next_btn:
+            await next_btn.click()
+        await asyncio.sleep(5)
+    except Exception as e:
+        # Maybe already logged into Google from a previous session
+        current_url = page.url
+        if "gitlab.com" in current_url:
+            _log("Already authenticated with Google, redirected back to GitLab")
+            return await _check_oauth_result(page)
+        return {"success": False, "error": f"Google OAuth email step failed: {e}"}
+
+    # Fill Google password
+    try:
+        # Wait for visible password input
+        all_pass = await page.query_selector_all('input[type="password"]')
+        pass_input = None
+        for _ in range(10):
+            for p in all_pass:
+                if await p.is_visible():
+                    pass_input = p
+                    break
+            if pass_input:
+                break
+            await asyncio.sleep(1)
+            all_pass = await page.query_selector_all('input[type="password"]')
+
+        if not pass_input:
+            # Try wait_for_selector as fallback
+            pass_input = await page.wait_for_selector(
+                'input[name="Passwd"]:visible, input[type="password"]:visible', timeout=10000
+            )
+
+        if not pass_input:
+            return {"success": False, "error": "Google OAuth: no visible password field"}
+
+        await pass_input.click()
+        await asyncio.sleep(0.3)
+        await page.keyboard.type(password, delay=random.randint(30, 60))
+        await asyncio.sleep(1)
+
+        next_btn2 = await page.query_selector('#passwordNext button, #passwordNext')
+        if next_btn2:
+            await next_btn2.click()
+        await asyncio.sleep(8)
+    except Exception as e:
+        current_url = page.url
+        if "gitlab.com" in current_url:
+            _log("Redirected to GitLab after password")
+            return await _check_oauth_result(page)
+        return {"success": False, "error": f"Google OAuth password step failed: {e}"}
+
+    # Handle potential Google consent screen ("Allow GitLab to access...")
+    await asyncio.sleep(3)
+    try:
+        allow_btn = await page.query_selector(
+            'button:has-text("Allow"), button:has-text("Continue"), '
+            'button[id="submit_approve_access"], div[id="submit_approve_access"]'
+        )
+        if allow_btn and await allow_btn.is_visible():
+            _log("Clicking Google consent 'Allow' button...")
+            await allow_btn.click()
+            await asyncio.sleep(5)
     except Exception:
         pass
 
-    # Check if we need email verification
+    # Should be redirected back to GitLab now
+    await asyncio.sleep(3)
+    return await _check_oauth_result(page)
+
+
+async def _check_oauth_result(page: Any) -> dict[str, Any]:
+    """Check the result after Google OAuth redirect back to GitLab."""
     current_url = page.url
-    page_content = await page.content()
-    content_lower = page_content.lower()
+    content = await page.content()
+    content_lower = content.lower()
 
-    if "almost there" in content_lower or "confirm your email" in content_lower or "verification" in content_lower:
-        _log("Email verification required - account created but needs confirmation")
-        return {
-            "success": True,
-            "needs_verification": True,
-            "message": "Account created - email verification required",
-            "username": username,
-        }
+    # Wait for CF if needed
+    await _wait_for_cloudflare(page, timeout_s=15)
+    current_url = page.url
 
-    # If we're redirected to dashboard or welcome page, signup succeeded
-    if "dashboard" in current_url or "welcome" in current_url or "projects" in current_url:
-        _log("Signup successful - redirected to dashboard")
-        return {"success": True, "needs_verification": False, "username": username}
+    # Success: redirected to dashboard/welcome/projects
+    if any(x in current_url for x in ["dashboard", "welcome", "projects", "/-/"]):
+        _log("Google OAuth signup successful - logged into GitLab!")
+        return {"success": True, "needs_verification": False}
 
-    # Check if we ended up on a "check your email" page
-    if "check" in content_lower and "email" in content_lower:
-        _log("Email verification required")
-        return {
-            "success": True,
-            "needs_verification": True,
-            "message": "Account created - check email for verification",
-            "username": username,
-        }
+    # Identity verification page - GitLab sends a code to email
+    if "identity_verification" in current_url:
+        _log("GitLab identity verification required (email code)")
+        return {"success": True, "needs_verification": True, "message": "Identity verification - need email code"}
 
-    _log(f"Signup result unclear. URL: {current_url}")
-    return {
-        "success": True,
-        "needs_verification": True,
-        "message": "Signup submitted - verification status unclear",
-        "username": username,
-    }
+    # GitLab might ask to set username for new OAuth accounts
+    username_field = await page.query_selector('#user_username, input[name="user[username]"]')
+    if username_field:
+        _log("GitLab asking for username (new OAuth account)...")
+        username = _derive_username(page.url.split("@")[0] if "@" in page.url else "user")
+        try:
+            await username_field.fill(username)
+            await asyncio.sleep(1)
+            submit = await page.query_selector('input[type="submit"], button[type="submit"]')
+            if submit:
+                await submit.click()
+                await asyncio.sleep(5)
+            _log(f"Set username to: {username}")
+            return {"success": True, "needs_verification": False, "username": username}
+        except Exception as e:
+            return {"success": False, "error": f"Failed to set username: {e}"}
+
+    # Check for errors
+    if "already been taken" in content_lower or "already registered" in content_lower:
+        return {"success": False, "error": "Email already registered on GitLab", "already_registered": True}
+
+    if "sign_in" in current_url:
+        # Still on sign-in page - OAuth might have failed
+        _log(f"Still on sign-in page after OAuth. URL: {current_url}")
+        return {"success": False, "error": "Google OAuth did not complete - still on sign-in page"}
+
+    _log(f"OAuth result unclear. URL: {current_url}")
+    return {"success": True, "needs_verification": False}
 
 
 async def _login(page: Any, email: str, password: str) -> dict[str, Any]:
@@ -934,20 +1073,28 @@ async def process_account(email: str, password: str, headless: bool = True) -> d
 
             # If verification is needed, try to verify via Gmail
             if signup_result.get("needs_verification"):
-                _log("Email verification required - attempting Gmail verification...")
-                verify_result = await _verify_email_via_gmail(page, email, password)
+                _log("Identity verification required - fetching code from Gmail...")
+                verify_result = await _verify_identity_code(page, email, password)
                 if not verify_result["success"]:
                     return {
                         "success": False,
-                        "error": f"Email verification failed: {verify_result['error']}",
+                        "error": f"Identity verification failed: {verify_result['error']}",
                         "needs_verification": True,
                         "username": signup_result.get("username", ""),
                     }
-                _log("Email verified! Proceeding to login...")
+                _log("Identity verified! Already logged in via OAuth, skipping login step...")
+                # After OAuth + verification, we're already logged in - skip to PAT creation
+            else:
+                # OAuth succeeded without verification - already logged in
+                _log("OAuth signup complete, already logged in - skipping login step...")
 
-            # Step 2: Login
-            _log("Step 2: Login")
-            login_result = await _login(page, email, password)
+            # Step 2: Login (only needed if OAuth didn't log us in)
+            # Check if we're already on a logged-in page
+            current_url = page.url
+            login_result = {"success": True}  # Default: assume logged in via OAuth
+            if "sign_in" in current_url:
+                _log("Step 2: Login")
+                login_result = await _login(page, email, password)
 
             if not login_result["success"]:
                 if login_result.get("rate_limited"):

@@ -70,6 +70,12 @@ export function ensureApiKeysTable() {
   // Add index on api_key_id for request_logs
   try { client.exec(`CREATE INDEX IF NOT EXISTS request_logs_api_key_idx ON request_logs(api_key_id)`); } catch {}
   try { client.exec(`CREATE INDEX IF NOT EXISTS usage_summary_api_key_idx ON usage_summary(api_key_id)`); } catch {}
+  // Migrate unique index to include api_key_id (set NULL → 0 first, then recreate index)
+  try {
+    client.exec(`UPDATE usage_summary SET api_key_id = 0 WHERE api_key_id IS NULL`);
+    client.exec(`DROP INDEX IF EXISTS usage_summary_bucket_provider_model_idx`);
+    client.exec(`CREATE UNIQUE INDEX IF NOT EXISTS usage_summary_bucket_provider_model_key_idx ON usage_summary(bucket, provider, model, api_key_id)`);
+  } catch {}
 }
 
 // ── CRUD Routes ──────────────────────────────────────────────────

@@ -16,9 +16,10 @@ export default function Usage() {
   }, []);
 
   async function load() {
+    const keyParam = selectedKeyId > 0 ? selectedKeyId : undefined;
     await Promise.all([
-      fetchDashboardStats().then(setStats).catch(() => setStats(null)),
-      fetchModelUsage().then((res: { data: any[] }) => setModelStats(res.data || [])).catch(() => setModelStats([])),
+      fetchDashboardStats(undefined, undefined, keyParam).then(setStats).catch(() => setStats(null)),
+      fetchModelUsage(undefined, undefined, keyParam).then((res: { data: any[] }) => setModelStats(res.data || [])).catch(() => setModelStats([])),
     ]);
   }
 
@@ -30,7 +31,7 @@ export default function Usage() {
   useEffect(() => {
     load();
     return () => { if (reloadRef.current) clearTimeout(reloadRef.current); };
-  }, []);
+  }, [selectedKeyId]);
 
   useWsEvent(["request_log", "request_error"], scheduleReload);
 

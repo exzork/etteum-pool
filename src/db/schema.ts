@@ -76,7 +76,7 @@ export const usageSummary = sqliteTable("usage_summary", {
   creditsUsed: real("credits_used").default(0),
   totalDurationMs: integer("total_duration_ms", { mode: "number" }).default(0),
 }, (table) => [
-  uniqueIndex("usage_summary_bucket_provider_model_idx").on(table.bucket, table.provider, table.model),
+  uniqueIndex("usage_summary_bucket_provider_model_key_idx").on(table.bucket, table.provider, table.model, table.apiKeyId),
   index("usage_summary_bucket_idx").on(table.bucket),
   index("usage_summary_provider_idx").on(table.provider, table.bucket),
   index("usage_summary_api_key_idx").on(table.apiKeyId),

@@ -48,15 +48,22 @@ function summaryBucketExpr(grain: "hour" | "day" | "month", timeZone: string) {
 /**
  * GET /api/stats - Get overall statistics (from usage_summary)
  * Supports optional ?hours=N&range=all to filter by time period
+ * Supports optional ?apiKeyId=N to filter by API key
  */
 statsRouter.get("/", async (c) => {
   const range = c.req.query("range");
   const hours = c.req.query("hours") ? clampNumber(c.req.query("hours"), 24, 1, 24 * 365) : null;
+  const apiKeyId = c.req.query("apiKeyId");
   const isAll = range === "all";
 
-  const timeFilter = (!isAll && hours)
-    ? sql`${usageSummary.bucket} >= ${new Date(Date.now() - hours * 60 * 60 * 1000).toISOString()}`
-    : sql`1=1`;
+  const conditions: ReturnType<typeof sql>[] = [];
+  if (!isAll && hours) {
+    conditions.push(sql`${usageSummary.bucket} >= ${new Date(Date.now() - hours * 60 * 60 * 1000).toISOString()}`);
+  }
+  if (apiKeyId) {
+    conditions.push(sql`${usageSummary.apiKeyId} = ${Number(apiKeyId)}`);
+  }
+  const timeFilter = conditions.length > 0 ? sql.join(conditions, sql` AND `) : sql`1=1`;
 
   const [poolStats, requestStats] = await Promise.all([
     pool.getStats(),
@@ -170,11 +177,13 @@ statsRouter.get("/requests/:id", async (c) => {
 
 /**
  * GET /api/stats/usage - Get usage over time (from usage_summary)
+ * Supports optional ?apiKeyId=N to filter by API key
  */
 statsRouter.get("/usage", async (c) => {
   const range = c.req.query("range");
   const hours = clampNumber(c.req.query("hours"), 24, 1, 24 * 365);
   const timeZone = normalizeTimeZone(c.req.query("timeZone"));
+  const apiKeyId = c.req.query("apiKeyId");
   const isAll = range === "all";
   const since = new Date(Date.now() - hours * 60 * 60 * 1000);
 
@@ -187,9 +196,15 @@ statsRouter.get("/usage", async (c) => {
         ? summaryBucketExpr("day", timeZone)
         : summaryBucketExpr("month", timeZone);
 
-  const whereExpr = isAll
-    ? sql`${usageSummary.totalTokens} > 0`
-    : sql`${usageSummary.bucket} >= ${since.toISOString()} AND ${usageSummary.totalTokens} > 0`;
+  const conditions: ReturnType<typeof sql>[] = [];
+  conditions.push(sql`${usageSummary.totalTokens} > 0`);
+  if (!isAll) {
+    conditions.push(sql`${usageSummary.bucket} >= ${since.toISOString()}`);
+  }
+  if (apiKeyId) {
+    conditions.push(sql`${usageSummary.apiKeyId} = ${Number(apiKeyId)}`);
+  }
+  const whereExpr = sql.join(conditions, sql` AND `);
 
   const hourlyUsage = await db
     .select({
@@ -267,15 +282,22 @@ statsRouter.get("/providers", async (c) => {
 /**
  * GET /api/stats/models - Get per-model statistics (from usage_summary)
  * Supports optional ?hours=N&range=all to filter by time period
+ * Supports optional ?apiKeyId=N to filter by API key
  */
 statsRouter.get("/models", async (c) => {
   const range = c.req.query("range");
   const hours = c.req.query("hours") ? clampNumber(c.req.query("hours"), 24, 1, 24 * 365) : null;
+  const apiKeyId = c.req.query("apiKeyId");
   const isAll = range === "all";
 
-  const whereExpr = (!isAll && hours)
-    ? sql`${usageSummary.bucket} >= ${new Date(Date.now() - hours * 60 * 60 * 1000).toISOString()}`
-    : sql`1=1`;
+  const conditions: ReturnType<typeof sql>[] = [];
+  if (!isAll && hours) {
+    conditions.push(sql`${usageSummary.bucket} >= ${new Date(Date.now() - hours * 60 * 60 * 1000).toISOString()}`);
+  }
+  if (apiKeyId) {
+    conditions.push(sql`${usageSummary.apiKeyId} = ${Number(apiKeyId)}`);
+  }
+  const whereExpr = conditions.length > 0 ? sql.join(conditions, sql` AND `) : sql`1=1`;
 
   const modelMeta = new Map(getAllModels().map((model) => [model.id, model]));
   const modelStats = await db

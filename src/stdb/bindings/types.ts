@@ -126,6 +126,7 @@ export const RequestLogs = __t.object("RequestLogs", {
   apiKeyId: __t.option(__t.u64()),
   apiKeyName: __t.option(__t.string()),
   createdAt: __t.u64(),
+  compressionStats: __t.option(__t.string()),
 });
 export type RequestLogs = __Infer<typeof RequestLogs>;
 

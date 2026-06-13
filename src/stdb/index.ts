@@ -311,6 +311,8 @@ export const call = {
     accountQuotaAfter: number;
     apiKeyId: bigint | null;
     apiKeyName: string | null;
+    /** JSON-encoded CompressionStats from the proxy compression pipeline. null when disabled. */
+    compressionStats: string | null;
   }) => getConn().reducers.insertRequestLog(args),
 
   updateRequestLog: (args: {

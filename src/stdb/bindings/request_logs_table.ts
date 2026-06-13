@@ -30,4 +30,5 @@ export default __t.row({
   apiKeyId: __t.option(__t.u64()).name("api_key_id"),
   apiKeyName: __t.option(__t.string()).name("api_key_name"),
   createdAt: __t.u64().name("created_at"),
+  compressionStats: __t.option(__t.string()).name("compression_stats"),
 });

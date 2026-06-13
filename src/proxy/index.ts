@@ -39,6 +39,19 @@ interface NewRequestLog {
   accountQuotaAfter?: number;
   apiKeyId?: number | bigint | null;
   apiKeyName?: string | null;
+  /** Compression pipeline stats (proxy/compression). Persisted as JSON string in stdb. */
+  compressionStats?: unknown;
+}
+
+/** Serialize compressionStats to a JSON string suitable for the stdb column, or null. */
+function serializeCompressionStats(stats: unknown): string | null {
+  if (stats == null) return null;
+  if (typeof stats === "string") return stats;
+  try {
+    return JSON.stringify(stats);
+  } catch {
+    return null;
+  }
 }
 
 /** Upsert a request's stats into the usage_summary table (5-minute bucket) */
@@ -114,6 +127,7 @@ export async function recordRequest(entry: NewRequestLog) {
       accountQuotaAfter: entry.accountQuotaAfter || 0,
       apiKeyId: entry.apiKeyId ? BigInt(entry.apiKeyId) : null,
       apiKeyName: entry.apiKeyName || null,
+      compressionStats: serializeCompressionStats(entry.compressionStats),
     });
     void upsertUsageSummary({
       provider: entry.provider || "unknown",
@@ -283,6 +297,7 @@ async function logProxyError(entry: NewRequestLog, label: string) {
       accountQuotaAfter: entry.accountQuotaAfter || 0,
       apiKeyId: entry.apiKeyId ? BigInt(entry.apiKeyId) : null,
       apiKeyName: entry.apiKeyName || null,
+      compressionStats: serializeCompressionStats(entry.compressionStats),
     });
     // Also track errors in usage_summary
     void upsertUsageSummary({
@@ -581,10 +596,9 @@ async function handleChatCompletion(body: ChatCompletionRequest, apiKey?: Resolv
     accountQuotaAfter: quotaAfter,
     apiKeyId: apiKey?.id || null,
     apiKeyName: apiKey?.name || null,
-    // compressionStats is in-memory only on our SpacetimeDB build — the
-    // request_logs reducer doesn't accept this field yet, so it's dropped
-    // when persisted. The dashboard request-detail panel that consumes it
-    // will simply see null until a stdb schema migration lands.
+    // Compression pipeline output. Stored as JSON-encoded text in the
+    // request_logs.compression_stats column (see spacetimedb schema) and
+    // parsed back to an object by /api/stats/requests for the dashboard.
     compressionStats: compressionStats ?? null,
   };
 
@@ -610,6 +624,7 @@ async function handleChatCompletion(body: ChatCompletionRequest, apiKey?: Resolv
         accountQuotaAfter: logEntry.accountQuotaAfter || 0,
         apiKeyId: logEntry.apiKeyId ? BigInt(logEntry.apiKeyId) : null,
         apiKeyName: logEntry.apiKeyName || null,
+        compressionStats: serializeCompressionStats(logEntry.compressionStats),
       });
 
       const createdAt = new Date().toISOString();
@@ -658,6 +673,7 @@ async function handleChatCompletion(body: ChatCompletionRequest, apiKey?: Resolv
     accountQuotaAfter: logEntry.accountQuotaAfter || 0,
     apiKeyId: logEntry.apiKeyId ? BigInt(logEntry.apiKeyId) : null,
     apiKeyName: logEntry.apiKeyName || null,
+    compressionStats: serializeCompressionStats(logEntry.compressionStats),
   });
 
   // Upsert to usage_summary + periodic prune

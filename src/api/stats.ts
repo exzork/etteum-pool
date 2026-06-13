@@ -23,6 +23,21 @@ function clampNumber(value: string | undefined, fallback: number, min: number, m
   return Math.min(max, Math.max(min, Math.floor(parsed)));
 }
 
+/**
+ * Best-effort JSON parse for fields stored as JSON-encoded strings in stdb columns
+ * (compressionStats, etc). Returns null when the input is null/empty/invalid so
+ * callers can hand straight to the dashboard, which expects `object | null`.
+ */
+function parseJsonField(raw: unknown): unknown {
+  if (raw == null || raw === "") return null;
+  if (typeof raw !== "string") return raw;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
 function bucketKey(bucket: string, grain: "5min" | "30min" | "3h" | "day" | "week"): string {
   const d = new Date(bucket);
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -138,11 +153,14 @@ statsRouter.get("/requests", async (c) => {
   // Paginate
   const paginated = logs.slice(offset, offset + limit);
 
-  // Strip requestBody and responseBody for performance, convert timestamps to ISO
+  // Strip requestBody and responseBody for performance, convert timestamps to ISO,
+  // and parse the JSON-encoded compressionStats column back into an object so the
+  // dashboard can read .saved/.byTechnique/etc directly.
   const data = paginated.map(({ requestBody, responseBody, ...rest }) => ({
     ...rest,
     createdAt: rest.createdAt ? new Date(Number(rest.createdAt)).toISOString() : null,
     lastUsedAt: (rest as any).lastUsedAt ? new Date(Number((rest as any).lastUsedAt)).toISOString() : null,
+    compressionStats: parseJsonField((rest as any).compressionStats),
   }));
 
   return c.json({ data, limit, offset });
@@ -158,6 +176,7 @@ statsRouter.get("/requests/:id", async (c) => {
   return c.json({ data: {
     ...log,
     createdAt: log.createdAt ? new Date(Number(log.createdAt)).toISOString() : null,
+    compressionStats: parseJsonField((log as any).compressionStats),
   } });
 });
 

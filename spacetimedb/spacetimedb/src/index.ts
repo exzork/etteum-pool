@@ -122,6 +122,13 @@ const requestLogs = table(
     apiKeyId: t.option(t.u64()),
     apiKeyName: t.option(t.string()),
     createdAt: t.u64(), // epoch ms
+    /**
+     * JSON-encoded CompressionStats from the proxy compression pipeline.
+     * See src/proxy/compression/types.ts. Optional and defaults to null —
+     * pre-existing rows have no value, and compression can be disabled per-config.
+     * Appended to the end of the row to keep schema migrations additive.
+     */
+    compressionStats: t.option(t.string()).default(undefined),
   }
 );
 
@@ -564,6 +571,7 @@ export const insertRequestLog = spacetimedb.reducer(
     accountQuotaAfter: t.f64(),
     apiKeyId: t.option(t.u64()),
     apiKeyName: t.option(t.string()),
+    compressionStats: t.option(t.string()), // JSON-encoded CompressionStats (or null when disabled)
   },
   (ctx, args) => {
     ctx.db.requestLogs.insert({

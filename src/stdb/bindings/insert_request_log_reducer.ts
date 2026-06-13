@@ -28,4 +28,5 @@ export default {
   accountQuotaAfter: __t.f64(),
   apiKeyId: __t.option(__t.u64()),
   apiKeyName: __t.option(__t.string()),
+  compressionStats: __t.option(__t.string()),
 };

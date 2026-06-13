@@ -80,7 +80,10 @@ async def _create_browser(headless: bool = True) -> dict[str, Any]:
         "os": "windows",
         "block_webrtc": True,
         "humanize": True,
+        "disable_coop": True,  # Allow clicking turnstile checkbox in cross-origin iframe
+        "i_know_what_im_doing": True,
         "screen": Screen(max_width=1920, max_height=1080),
+        "window": (1280, 900),
     }
 
     # Proxy support

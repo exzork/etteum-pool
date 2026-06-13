@@ -560,11 +560,11 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
           tokens: JSON.stringify(credentials),
           quotaLimit: account.quotaLimit,
           quotaRemaining: account.quotaRemaining,
-          quotaResetAt: account.quotaResetAt ?? null,
-          lastUsedAt: account.lastUsedAt ?? null,
+          quotaResetAt: account.quotaResetAt ?? undefined,
+          lastUsedAt: account.lastUsedAt ?? undefined,
           lastLoginAt: BigInt(Date.now()),
           errorMessage: `Login OK but upgrade failed: ${upgradeError}`,
-          metadata: account.metadata ?? null,
+          metadata: account.metadata ?? undefined,
         });
 
         if (upgradeResult?.card_last4) {
@@ -622,10 +622,10 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
       tokens: JSON.stringify(credentials),
       quotaLimit,
       quotaRemaining,
-      quotaResetAt: account.quotaResetAt ?? null,
-      lastUsedAt: account.lastUsedAt ?? null,
+      quotaResetAt: account.quotaResetAt ?? undefined,
+      lastUsedAt: account.lastUsedAt ?? undefined,
       lastLoginAt: BigInt(Date.now()),
-      errorMessage: null,
+      errorMessage: undefined,
       metadata: JSON.stringify(quotaMetadata),
     });
 

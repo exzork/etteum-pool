@@ -91,30 +91,27 @@ class LoginQueue {
           const existing = db.accounts.findByProviderEmail(provider, item.email);
           if (existing) continue;
 
-          // Generate a new ID (use max existing + 1)
-          const allAccounts = db.accounts.getAll();
-          const maxId = allAccounts.reduce((max, a) => a.id > max ? a.id : max, 0n);
-          const newId = maxId + 1n;
-
-          await call.upsertAccount({
-            id: newId,
+          // Use 0n for auto-increment ID
+          call.upsertAccount({
+            id: 0n,
             provider,
             email: item.email,
             password: encrypt(item.password),
             status: "pending",
             enabled: true,
-            tokens: null,
+            tokens: undefined,
             quotaLimit: 0,
             quotaRemaining: 0,
-            quotaResetAt: null,
-            lastUsedAt: null,
-            lastLoginAt: null,
-            errorMessage: null,
-            metadata: null,
+            quotaResetAt: undefined,
+            lastUsedAt: undefined,
+            lastLoginAt: undefined,
+            errorMessage: undefined,
+            metadata: undefined,
           });
 
           created++;
-          accountIds.push(Number(newId));
+          // We can't know the assigned ID immediately, so queue by email lookup after a delay
+          accountIds.push(0); // placeholder
         } catch {
           // Skip duplicates
         }
@@ -123,10 +120,21 @@ class LoginQueue {
 
     if (options.concurrency !== undefined) this.setConcurrency(options.concurrency);
 
-    // Queue all created accounts for login
-    this.enqueueBulk(accountIds, { headless: options.headless, browserEngine: options.browserEngine });
+    // Wait a moment for SpacetimeDB subscription to reflect the new accounts
+    await new Promise(r => setTimeout(r, 1500));
 
-    return { created, queued: accountIds.length };
+    // Find the newly created accounts by status=pending and queue them
+    const pendingAccounts = db.accounts.getAll().filter(
+      (a: any) => a.status === "pending" && items.some(item => 
+        item.providers.some(p => p === a.provider) && item.email === a.email
+      )
+    );
+    const resolvedIds = pendingAccounts.map((a: any) => Number(a.id));
+
+    // Queue all created accounts for login
+    this.enqueueBulk(resolvedIds, { headless: options.headless, browserEngine: options.browserEngine });
+
+    return { created, queued: resolvedIds.length };
   }
 
   /**

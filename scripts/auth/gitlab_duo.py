@@ -75,7 +75,8 @@ async def _create_browser(headless: bool = True) -> dict[str, Any]:
     from camoufox.async_api import AsyncCamoufox
 
     camoufox_kwargs: dict[str, Any] = {
-        "headless": headless,
+        # Use "virtual" (Xvfb) instead of True to bypass Cloudflare turnstile detection
+        "headless": "virtual" if headless else False,
         "os": "windows",
         "block_webrtc": True,
         "humanize": True,
@@ -132,6 +133,32 @@ async def _type_slowly(page: Any, selector: str, text: str, delay: int = 50) -> 
     await locator.press_sequentially(text, delay=delay)
 
 
+async def _wait_for_cloudflare(page: Any, timeout_s: int = 30) -> bool:
+    """Wait for Cloudflare challenge to resolve. Returns True if passed."""
+    for i in range(timeout_s // 2):
+        # Check if we already have the real page
+        login_field = await page.query_selector('#user_login, input[name="user[login]"], #new_user_username')
+        if login_field:
+            return True
+
+        # Try to find and click the turnstile iframe checkbox
+        frames = page.frames
+        cf_frames = [f for f in frames if 'challenges.cloudflare.com' in f.url]
+        if cf_frames:
+            try:
+                cf_frame = cf_frames[0]
+                cb = await cf_frame.query_selector('input[type="checkbox"]')
+                if cb:
+                    await cb.click()
+                else:
+                    await cf_frame.click('body')
+            except Exception:
+                pass
+
+        await asyncio.sleep(2)
+
+    return False
+
 async def _check_captcha(page: Any) -> bool:
     """Check if a CAPTCHA is present on the page."""
     captcha_indicators = [
@@ -157,11 +184,15 @@ async def _check_captcha(page: Any) -> bool:
 async def _check_rate_limit(page: Any) -> bool:
     """Check if we're being rate limited."""
     try:
+        title = await page.title()
+        # Don't flag CF challenge pages as rate limited
+        cf_titles = ["just a moment", "un momento", "tunggu sebentar", "трохи зачекайте", "einen moment"]
+        if any(t in title.lower() for t in cf_titles):
+            return False
         content = await page.content()
         rate_limit_indicators = [
             "rate limit",
             "too many requests",
-            "429",
             "please try again later",
             "temporarily blocked",
         ]
@@ -357,6 +388,11 @@ async def _login(page: Any, email: str, password: str) -> dict[str, Any]:
 
     await page.goto(GITLAB_SIGNIN_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
     await asyncio.sleep(2)
+
+    # Wait for Cloudflare challenge to resolve
+    cf_passed = await _wait_for_cloudflare(page, timeout_s=30)
+    if not cf_passed:
+        return {"success": False, "error": "Cloudflare challenge did not resolve"}
 
     # Check for rate limiting
     if await _check_rate_limit(page):

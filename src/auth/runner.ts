@@ -358,6 +358,8 @@ async function loginGitLabDuo(account: Account, password: string, headless: bool
   });
 
   try {
+    const proxyUrlForAuth = (await getNextProxy("auth"))?.url || "";
+
     const proc = Bun.spawn(
       [
         config.pythonPath,
@@ -374,6 +376,9 @@ async function loginGitLabDuo(account: Account, password: string, headless: bool
           ...process.env,
           PYTHONUNBUFFERED: "1",
           DISPLAY: process.env.DISPLAY || ":0",
+          BATCHER_PROXY_URL: proxyUrlForAuth || config.proxyUrl || "",
+          HTTP_PROXY: proxyUrlForAuth || config.proxyUrl || "",
+          HTTPS_PROXY: proxyUrlForAuth || config.proxyUrl || "",
         },
         cwd: config.authScriptCwd,
       }

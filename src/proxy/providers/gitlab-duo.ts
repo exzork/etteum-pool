@@ -130,8 +130,16 @@ export class GitLabDuoProvider extends BaseProvider {
   private getTokens(account: Account): GitLabDuoTokens | null {
     if (!account.tokens) return null;
     try {
-      const t = typeof account.tokens === "string" ? JSON.parse(account.tokens) : account.tokens;
-      if (!t || typeof t !== "object" || !t.pat) return null;
+      // Handle three observed shapes:
+      //   (a) plain object  — already deserialized somewhere upstream
+      //   (b) JSON string of an object — { "pat": "..." }
+      //   (c) JSON string of a JSON string — "{\"pat\":\"...\"}"
+      //       (some upstream auth flows stringify twice; harmless but we have
+      //       to peel both layers off)
+      let t: any = account.tokens;
+      if (typeof t === "string") t = JSON.parse(t);
+      if (typeof t === "string") t = JSON.parse(t);
+      if (!t || typeof t !== "object" || !t.pat || typeof t.pat !== "string") return null;
       return t as GitLabDuoTokens;
     } catch {
       return null;

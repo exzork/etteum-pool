@@ -6,6 +6,7 @@
 set -e
 BASE="http://localhost:1930"
 DB="data/poolprox3.db"
+KEY="${POOL_API_KEY:?POOL_API_KEY must be set in env (sk-pool-... token)}"
 
 # Capture max ID before test for clean diff
 START_ID=$(sqlite3 "$DB" "SELECT COALESCE(MAX(id),0) FROM request_logs;")
@@ -17,7 +18,7 @@ post_anthropic() {
   echo "→ $label"
   curl -s -X POST "$BASE/v1/messages" \
     -H "Content-Type: application/json" \
-    -H "x-api-key: REDACTED" \
+    -H "x-api-key: $KEY" \
     -H "anthropic-version: 2023-06-01" \
     -d "$payload" -o /dev/null -w "  HTTP %{http_code}\n" || true
   sleep 0.4
@@ -28,7 +29,7 @@ post_openai() {
   echo "→ $label"
   curl -s -X POST "$BASE/v1/chat/completions" \
     -H "Content-Type: application/json" \
-    -H "Authorization: Bearer REDACTED" \
+    -H "Authorization: Bearer $KEY" \
     -d "$payload" -o /dev/null -w "  HTTP %{http_code}\n" || true
   sleep 0.4
 }

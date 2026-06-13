@@ -85,7 +85,7 @@ else if (account.provider === "qoder") {
 ### API Usage
 ```bash
 curl -X POST http://localhost:1930/api/accounts/361/open-panel \
-  -H "Authorization: Bearer REDACTED"
+  -H "Authorization: Bearer <REDACTED>"
 ```
 
 Response:

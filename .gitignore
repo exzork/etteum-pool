@@ -83,3 +83,4 @@ drizzle/
 
 # Nested git repos (external services)
 services/windsurf-api/
+.env.bak-*

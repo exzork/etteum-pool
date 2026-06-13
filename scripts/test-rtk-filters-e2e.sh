@@ -6,7 +6,7 @@
 set -e
 BASE="http://localhost:1930"
 DB="data/poolprox3.db"
-KEY="REDACTED"
+KEY="${POOL_API_KEY:?POOL_API_KEY must be set in env (sk-pool-... token)}"
 
 START_ID=$(sqlite3 "$DB" "SELECT COALESCE(MAX(id),0) FROM request_logs;")
 echo "Starting from request id > $START_ID"

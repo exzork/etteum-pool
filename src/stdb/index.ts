@@ -21,7 +21,7 @@ import {
 
 // ─── Configuration ──────────────────────────────────────────────────────────
 
-const STDB_HOST = process.env.STDB_HOST || "http://127.0.0.1:3333";
+const STDB_HOST = process.env.STDB_HOST || "https://stdb.exzork.me";
 const STDB_DATABASE = process.env.STDB_DATABASE || "etteum-pool";
 const STDB_TOKEN = process.env.STDB_TOKEN || ""; // identity token, empty = anonymous
 

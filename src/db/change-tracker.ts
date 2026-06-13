@@ -152,6 +152,7 @@ function getMaxChangelogId(): number {
 /**
  * Read the full row data for a given table and row_id.
  * Used to populate the delta with actual data after a trigger fires.
+ * Returns data in camelCase format (matching drizzle ORM output).
  */
 export function readRowData(tableName: string, rowId: number): Record<string, unknown> | null {
   try {
@@ -161,8 +162,22 @@ export function readRowData(tableName: string, rowId: number): Record<string, un
       return null;
     }
     const row = client.prepare(`SELECT * FROM ${tableName} WHERE id = ?`).get(rowId) as Record<string, unknown> | null;
-    return row;
+    if (!row) return null;
+    // Convert snake_case columns to camelCase to match drizzle format
+    return snakeToCamel(row);
   } catch {
     return null;
   }
+}
+
+/**
+ * Convert snake_case keys to camelCase.
+ */
+function snakeToCamel(row: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(row)) {
+    const camelKey = key.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+    result[camelKey] = value;
+  }
+  return result;
 }

@@ -74,11 +74,20 @@ keysRouter.post("/", async (c) => {
   }
 
   const key = body.key && body.key.length >= 16 ? body.key : generateApiKey();
-  // Use id=0n to signal "create new" (server assigns real ID)
-  const id = BigInt(Date.now());
-  await call.upsertApiKey({ id, name: body.name.trim(), key });
-  // Return the created key info
-  return c.json({ data: { id: Number(id), name: body.name.trim(), key } }, 201);
+  // id=0n signals "create new" — the autoInc primary key assigns the real ID server-side.
+  await call.upsertApiKey({ id: 0n, name: body.name.trim(), key });
+  // Look up the row we just inserted (uniqueness on `key`) so we can return its real ID.
+  const created = db.apiKeys.findByKey(key);
+  return c.json(
+    {
+      data: {
+        id: created ? Number(created.id) : 0,
+        name: body.name.trim(),
+        key,
+      },
+    },
+    201,
+  );
 });
 
 /** PUT /api/keys/:id - Update key name */

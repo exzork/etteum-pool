@@ -1,6 +1,4 @@
 import { db } from "../db/index";
-import { settings } from "../db/schema";
-import { eq, inArray } from "drizzle-orm";
 import { warmupQueue } from "./warmup-queue";
 import { broadcast } from "../ws/index";
 import { addAuthLog } from "./logs";
@@ -47,8 +45,9 @@ class AutoWarmupScheduler {
     }
 
     const keys = [INTERVAL_KEY, ...config.providers.map((p) => `${ENABLED_KEY_PREFIX}${p}`)];
-    const rows = await db.select().from(settings).where(inArray(settings.key, keys));
-    const map = new Map(rows.map((row) => [row.key, row.value]));
+    const allSettings = db.settings.getAll();
+    const rows = allSettings.filter((s: any) => keys.includes(s.key));
+    const map = new Map(rows.map((row: any) => [row.key, row.value]));
 
     const rawInterval = Number(map.get(INTERVAL_KEY));
     this.intervalMinutes = Number.isFinite(rawInterval) && rawInterval > 0

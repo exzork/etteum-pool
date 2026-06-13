@@ -2,42 +2,39 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { config } from "./config";
-import { runMigrations } from "./db/migrate";
+import { initStdb, db, call } from "./db/index";
 import { apiRouter } from "./api/index";
 import { authRouter } from "./auth/index";
 import { proxyRouter } from "./proxy/index";
 import { websocketHandler, getClientCount } from "./ws/index";
-import { isValidApiKey, resolveApiKey, ensureApiKeysTable, type ResolvedApiKey } from "./api/keys";
-import { initSync, isSyncEnabled, isSyncMaster, handleSyncOpen, handleSyncMessage, handleSyncClose, getSyncStatus } from "./sync/index";
+import { isValidApiKey, resolveApiKey, type ResolvedApiKey } from "./api/keys";
 import { autoWarmupScheduler } from "./auth/warmup-scheduler";
-import { db } from "./db/index";
-import { filterRules } from "./db/schema";
-import { sql } from "drizzle-orm";
 import { PUDIDIL_FILTERS } from "./proxy/filters";
 import { loadFilterCache } from "./proxy/filter-cache";
-import { ensureModelMappingTable, seedModelMappings, loadModelMappingCache } from "./proxy/model-mapping";
+import { loadModelMappingCache } from "./proxy/model-mapping";
 import { refreshByokModels } from "./proxy/providers/registry";
+import { getStdbStatus } from "./db/index";
 
-// Run database migrations on startup
-await runMigrations();
-
-// Ensure api_keys table exists (idempotent)
-ensureApiKeysTable();
+// Initialize SpacetimeDB connection (replaces SQLite + sync)
+await initStdb();
+console.log("[STDB] Connected and subscribed to all tables");
 
 // Seed filter rules from PUDIDIL_FILTERS if table is empty (first boot only)
 try {
-  const [row] = await db.select({ count: sql<number>`COUNT(*)` }).from(filterRules);
-  if (Number(row?.count || 0) === 0) {
-    await db.insert(filterRules).values(
-      PUDIDIL_FILTERS.map((r, i) => ({
+  const existingRules = db.filterRules.getAll();
+  if (existingRules.length === 0) {
+    for (let i = 0; i < PUDIDIL_FILTERS.length; i++) {
+      const r = PUDIDIL_FILTERS[i];
+      call.upsertFilterRule({
+        id: 0n,
         ruleId: r.id,
         pattern: r.pattern,
         replacement: r.replacement,
         isActive: r.is_active,
         isRegex: r.is_regex,
         sortOrder: i,
-      }))
-    );
+      });
+    }
     console.log(`[DB] Seeded ${PUDIDIL_FILTERS.length} filter rules`);
   }
   await loadFilterCache();
@@ -45,11 +42,8 @@ try {
   console.error("[DB] Filter rules seed/load skipped:", e instanceof Error ? e.message : e);
 }
 
-// Ensure model_mappings table exists (idempotent), seed Claude Code templates
-// on first boot, then load the in-memory cache used by the proxy hot path.
+// Load model mapping cache
 try {
-  ensureModelMappingTable();
-  await seedModelMappings();
   await loadModelMappingCache();
 } catch (e) {
   console.error("[DB] Model mapping init skipped:", e instanceof Error ? e.message : e);
@@ -67,8 +61,6 @@ try {
 // Start auto-warmup scheduler (reads settings from DB)
 await autoWarmupScheduler.start();
 
-// Initialize sync system
-await initSync();
 
 // Create Hono app
 const app = new Hono();
@@ -169,9 +161,9 @@ app.post("/api/login", async (c) => {
   return c.json({ success: true, token: config.apiKey });
 });
 
-// Sync status endpoint
+// Sync status endpoint (now shows SpacetimeDB status)
 app.get("/api/sync/status", async (c) => {
-  return c.json(getSyncStatus());
+  return c.json(getStdbStatus());
 });
 
 // Serve dashboard static files (SPA fallback)
@@ -206,13 +198,6 @@ const server = Bun.serve({
       return new Response("WebSocket upgrade failed", { status: 400 });
     }
 
-    // Sync WebSocket endpoint (master only)
-    if (url.pathname === "/sync" && isSyncEnabled() && isSyncMaster()) {
-      const upgraded = server.upgrade(req, { data: { type: "sync" } });
-      if (upgraded) return undefined;
-      return new Response("WebSocket upgrade failed", { status: 400 });
-    }
-
     // Try Hono routes first (API, proxy, etc.)
     const response = await app.fetch(req, { ip: server.requestIP(req) });
     if (response.status !== 404) return response;
@@ -240,28 +225,13 @@ const server = Bun.serve({
   },
   websocket: {
     open(ws: any) {
-      const data = ws.data as { type?: string };
-      if (data?.type === "sync") {
-        handleSyncOpen(ws);
-      } else {
-        websocketHandler.open(ws);
-      }
+      websocketHandler.open(ws);
     },
     message(ws: any, message: string | Buffer) {
-      const data = ws.data as { type?: string };
-      if (data?.type === "sync") {
-        handleSyncMessage(ws, typeof message === "string" ? message : message.toString());
-      } else {
-        websocketHandler.message(ws, message);
-      }
+      websocketHandler.message(ws, message);
     },
     close(ws: any) {
-      const data = ws.data as { type?: string };
-      if (data?.type === "sync") {
-        handleSyncClose(ws);
-      } else {
-        websocketHandler.close(ws);
-      }
+      websocketHandler.close(ws);
     },
     drain(ws: any) {
       websocketHandler.drain(ws);
@@ -275,7 +245,7 @@ console.log(`
 ╠══════════════════════════════════════════════════╣
 ║  HTTP:      http://localhost:${config.port}               ║
 ║  WebSocket: ws://localhost:${config.port}/ws              ║
-║  Database:  SQLite                              ║
+║  Database:  SpacetimeDB                         ║
 ║  Dashboard: http://localhost:${config.dashboardPort}              ║
 ╠══════════════════════════════════════════════════╣
 ║  Endpoints:                                      ║

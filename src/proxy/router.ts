@@ -4,12 +4,18 @@ import { isNonAccountRequestError, isTransientError } from "./errors";
 import { applyPudidilFilters } from "./filters";
 import { pool } from "./pool";
 import type { Account } from "../db/index";
+import {
+  compressRequest,
+  getCompressionConfig,
+  type CompressionStats,
+} from "./compression";
 
 export interface RouteResult {
   result: ProviderResult;
   account: Account;
   provider: ProviderName;
   durationMs: number;
+  compressionStats?: CompressionStats;
 }
 
 /** Check if a request contains image content blocks */
@@ -98,6 +104,19 @@ export async function routeRequest(
     throw new Error(`No provider found for model: ${sanitizedRequest.model}`);
   }
 
+  // Apply compression pipeline (RTK + DCP + Caveman + image dedupe + cache markers).
+  // Failures here are non-fatal — fall back to the sanitized request and move on.
+  let compressedRequest = sanitizedRequest;
+  let compressionStats: CompressionStats | undefined;
+  try {
+    const cfg = await getCompressionConfig();
+    const out = compressRequest(sanitizedRequest, cfg, providerName);
+    compressedRequest = out.request;
+    compressionStats = out.stats;
+  } catch (err) {
+    console.error("[Compression] Failed, passing request through unchanged:", err);
+  }
+
   const provider = providers[providerName];
   if (!provider) {
     throw new Error(`Provider not configured: ${providerName}`);
@@ -121,7 +140,7 @@ export async function routeRequest(
     // BYOK uses prefix-based account lookup (not the generic pool),
     // so it can also find error-status accounts and retry them.
     const account = providerName === "byok"
-      ? (await pool.getAccountForModel(sanitizedRequest.model))?.account ?? null
+      ? (await pool.getAccountForModel(compressedRequest.model))?.account ?? null
       : await pool.getNextAccount(providerName);
     if (!account) {
       throw new Error(
@@ -136,8 +155,8 @@ export async function routeRequest(
       pool.trackRequestStart(account.id);
       tracked = true;
       const result = stream
-        ? await provider.chatCompletionStream(account, sanitizedRequest)
-        : await provider.chatCompletion(account, sanitizedRequest);
+        ? await provider.chatCompletionStream(account, compressedRequest)
+        : await provider.chatCompletion(account, compressedRequest);
 
       const durationMs = Date.now() - startTime;
 
@@ -147,7 +166,7 @@ export async function routeRequest(
           await pool.updateTokens(account.id, result.tokens);
         }
         await pool.markUsed(account.id);
-        return { result, account, provider: providerName, durationMs };
+        return { result, account, provider: providerName, durationMs, compressionStats };
       }
 
       pool.trackRequestEnd(account.id);
@@ -157,7 +176,7 @@ export async function routeRequest(
       // is a bad request, not an account/session failure, so stop retrying and
       // let the API layer return an invalid_model response.
       if (isNonAccountRequestError(result.error)) {
-        throw new Error(result.error || `Invalid model: ${sanitizedRequest.model}`);
+        throw new Error(result.error || `Invalid model: ${compressedRequest.model}`);
       }
 
       // Handle rate limiting (429) — temporary, don't mark exhausted
@@ -192,8 +211,8 @@ export async function routeRequest(
           pool.trackRequestStart(account.id);
           tracked = true;
           const retryResult = stream
-            ? await provider.chatCompletionStream(account, sanitizedRequest)
-            : await provider.chatCompletion(account, sanitizedRequest);
+            ? await provider.chatCompletionStream(account, compressedRequest)
+            : await provider.chatCompletion(account, compressedRequest);
 
           if (retryResult.success) {
             await pool.markUsed(account.id);
@@ -202,6 +221,7 @@ export async function routeRequest(
               account,
               provider: providerName,
               durationMs: Date.now() - startTime,
+              compressionStats,
             };
           }
           pool.trackRequestEnd(account.id);

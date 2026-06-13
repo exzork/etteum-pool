@@ -41,6 +41,8 @@ export const requestLogs = sqliteTable("request_logs", {
   accountQuotaAfter: real("account_quota_after").default(0),
   apiKeyId: integer("api_key_id"),
   apiKeyName: text("api_key_name"),
+  /** JSON-encoded CompressionStats (see src/proxy/compression/types.ts). null when compression is fully disabled. */
+  compressionStats: text("compression_stats", { mode: "json" }),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
 }, (table) => [
   index("request_logs_created_at_idx").on(table.createdAt),

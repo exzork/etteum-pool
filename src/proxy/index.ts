@@ -523,7 +523,7 @@ async function handleChatCompletion(body: ChatCompletionRequest, apiKey?: Resolv
   // the assistant's hardcoded haiku/sonnet/opus ids -> a model in the pool).
   body = { ...body, model: resolveModelAlias(normalizeModelId(body.model)) };
   const isStream = body.stream === true;
-  const { result, account, provider, durationMs } = await routeRequest(body, isStream);
+  const { result, account, provider, durationMs, compressionStats } = await routeRequest(body, isStream);
   let shouldReleaseTracking = true;
 
   try {
@@ -581,6 +581,11 @@ async function handleChatCompletion(body: ChatCompletionRequest, apiKey?: Resolv
     accountQuotaAfter: quotaAfter,
     apiKeyId: apiKey?.id || null,
     apiKeyName: apiKey?.name || null,
+    // compressionStats is in-memory only on our SpacetimeDB build — the
+    // request_logs reducer doesn't accept this field yet, so it's dropped
+    // when persisted. The dashboard request-detail panel that consumes it
+    // will simply see null until a stdb schema migration lands.
+    compressionStats: compressionStats ?? null,
   };
 
     if (isStream && result.stream) {

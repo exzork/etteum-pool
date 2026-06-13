@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Save, RefreshCw, Zap, Flame, Globe } from "lucide-react";
+import { Save, RefreshCw, Zap, Flame, Globe, Wand2 } from "lucide-react";
 import {
   fetchSettings,
   updateSettings,
@@ -35,6 +35,16 @@ export default function Settings() {
     auto_warmup_interval_minutes: "15",
     proxy_pool_usage: "all",
     proxy_pool_rotation: "round_robin",
+    // Compression defaults — keep in sync with DEFAULT_COMPRESSION_CONFIG.
+    compression_rtk_enabled: "true",
+    compression_rtk_max_tool_chars: "4000",
+    compression_rtk_keep_last_n_turns_full: "2",
+    compression_rtk_smart_truncate: "true",
+    compression_dcp_enabled: "false",
+    compression_caveman_enabled: "false",
+    compression_caveman_level: "lite",
+    compression_cache_markers_enabled: "true",
+    compression_image_dedupe_enabled: "true",
   });
   const [warmupStatus, setWarmupStatus] = useState<AutoWarmupStatus | null>(null);
   const [savedAt, setSavedAt] = useState<Date | null>(null);
@@ -328,7 +338,164 @@ export default function Settings() {
             </div>
           </CardContent>
         </Card>
+
+        {/* Compression — token saver pipeline */}
+        <Card className="border-[var(--border)] lg:col-span-2">
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <Wand2 className="w-4 h-4 text-[var(--primary)]" />
+              Compression
+            </CardTitle>
+            <CardDescription>
+              Reduce token usage by compressing tool outputs, deduplicating context, and shortening prompts. Pipeline runs in order: DCP → RTK → Caveman → Image Dedupe → Cache Markers.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {/* RTK */}
+            <CompressionRow
+              title="RTK"
+              subtitle="Tool Result Compression"
+              description="Truncates large tool outputs (git diff, grep, file reads) in OLDER turns. The last N turns are passed through untouched so the model still sees fresh context."
+              enabled={form.compression_rtk_enabled === "true"}
+              onToggle={(v) => setValue("compression_rtk_enabled", v ? "true" : "false")}
+            >
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
+                <div>
+                  <label className="text-xs text-[var(--muted-foreground)]">Max chars per tool result</label>
+                  <Input
+                    type="number"
+                    min={500}
+                    max={50000}
+                    step={500}
+                    value={form.compression_rtk_max_tool_chars || "4000"}
+                    onChange={(e) => setValue("compression_rtk_max_tool_chars", e.target.value)}
+                    className="mt-1"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-[var(--muted-foreground)]">Keep last N turns full</label>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={20}
+                    value={form.compression_rtk_keep_last_n_turns_full || "2"}
+                    onChange={(e) => setValue("compression_rtk_keep_last_n_turns_full", e.target.value)}
+                    className="mt-1"
+                  />
+                </div>
+                <div className="flex items-end">
+                  <label className="flex items-center gap-2 text-xs text-[var(--foreground)]">
+                    <input
+                      type="checkbox"
+                      checked={form.compression_rtk_smart_truncate === "true"}
+                      onChange={(e) => setValue("compression_rtk_smart_truncate", e.target.checked ? "true" : "false")}
+                    />
+                    Smart truncate (git diff / tree)
+                  </label>
+                </div>
+              </div>
+            </CompressionRow>
+
+            {/* DCP */}
+            <CompressionRow
+              title="DCP"
+              subtitle="Context Deduplication"
+              description="When the same read-only tool (Read, Glob, Grep, LS, WebFetch) is called twice with identical input, the older result is replaced with a short reference stub. Lossless from the model's perspective."
+              enabled={form.compression_dcp_enabled === "true"}
+              onToggle={(v) => setValue("compression_dcp_enabled", v ? "true" : "false")}
+            />
+
+            {/* Caveman */}
+            <CompressionRow
+              title="Caveman"
+              subtitle="Terse System Prompt"
+              description="Strips filler words and compacts the system prompt. ⚠️ Off by default — aggressive levels can change model behaviour. Test with your own prompts before enabling Full or Ultra."
+              enabled={form.compression_caveman_enabled === "true"}
+              onToggle={(v) => setValue("compression_caveman_enabled", v ? "true" : "false")}
+            >
+              {form.compression_caveman_enabled === "true" && (
+                <div className="grid grid-cols-3 gap-2 mt-3">
+                  {(["lite", "full", "ultra"] as const).map((lvl) => (
+                    <button
+                      key={lvl}
+                      type="button"
+                      onClick={() => setValue("compression_caveman_level", lvl)}
+                      className={`rounded-md border px-3 py-2 text-xs font-medium transition-colors ${
+                        form.compression_caveman_level === lvl
+                          ? "border-[var(--primary)] bg-[var(--primary)]/10 text-[var(--primary)]"
+                          : "border-[var(--border)] bg-[var(--secondary)] text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                      }`}
+                    >
+                      <div className="capitalize">{lvl}</div>
+                      <div className="text-[10px] mt-0.5 opacity-70">
+                        {lvl === "lite" ? "Drop filler" : lvl === "full" ? "Bullet form" : "Telegraphic"}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </CompressionRow>
+
+            {/* Cache Markers */}
+            <CompressionRow
+              title="Cache Markers"
+              subtitle="Anthropic Prompt Caching"
+              description="Tags the stable system-prompt prefix with cache_control:ephemeral so upstream providers can cache it. Auto-skips when prefix contains timestamps or UUIDs (would never cache anyway). Pays off as ~75% discount on repeat input tokens."
+              enabled={form.compression_cache_markers_enabled === "true"}
+              onToggle={(v) => setValue("compression_cache_markers_enabled", v ? "true" : "false")}
+            />
+
+            {/* Image Dedupe */}
+            <CompressionRow
+              title="Image Dedupe"
+              subtitle="Duplicate Image Detection"
+              description="When the same image is attached more than once in a request, later occurrences are replaced with a reference stub. Lossless — the image is still in earlier context."
+              enabled={form.compression_image_dedupe_enabled === "true"}
+              onToggle={(v) => setValue("compression_image_dedupe_enabled", v ? "true" : "false")}
+            />
+          </CardContent>
+        </Card>
       </div>
+    </div>
+  );
+}
+
+function CompressionRow({
+  title,
+  subtitle,
+  description,
+  enabled,
+  onToggle,
+  children,
+}: {
+  title: string;
+  subtitle: string;
+  description: string;
+  enabled: boolean;
+  onToggle: (v: boolean) => void;
+  children?: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)]/40 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-baseline gap-2">
+            <span className="text-sm font-semibold text-[var(--foreground)]">{title}</span>
+            <span className="text-xs text-[var(--muted-foreground)]">({subtitle})</span>
+          </div>
+          <p className="mt-1 text-xs text-[var(--muted-foreground)]">{description}</p>
+        </div>
+        <label className="relative inline-flex items-center cursor-pointer shrink-0">
+          <input
+            type="checkbox"
+            className="sr-only peer"
+            checked={enabled}
+            onChange={(e) => onToggle(e.target.checked)}
+          />
+          <div className="w-10 h-5 bg-[var(--border)] peer-checked:bg-[var(--primary)] rounded-full transition-colors after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-5"></div>
+        </label>
+      </div>
+      {enabled && children}
     </div>
   );
 }

@@ -4,6 +4,10 @@ import { config } from "../config";
 import { pool } from "../proxy/pool";
 import { autoWarmupScheduler, isAutoWarmupSettingKey } from "../auth/warmup-scheduler";
 import { invalidateProxySettingsCache } from "../services/proxy-pool";
+import {
+  invalidateCompressionCache,
+  isCompressionSettingKey,
+} from "../proxy/compression";
 
 function isProxyPoolSettingKey(key: string): boolean {
   return key === "proxy_pool_usage" || key === "proxy_pool_rotation";
@@ -69,6 +73,10 @@ proxySettingsRouter.put("/:key", async (c) => {
     void autoWarmupScheduler.reload();
   }
 
+  if (isCompressionSettingKey(key)) {
+    invalidateCompressionCache();
+  }
+
   return c.json({ key, value: body.value });
 });
 
@@ -97,6 +105,7 @@ proxySettingsRouter.put("/", async (c) => {
   let lbCacheTouched = false;
   let warmupTouched = false;
   let proxyPoolTouched = false;
+  let compressionTouched = false;
   for (const [key, value] of Object.entries(body)) {
     await call.upsertSetting({ key, value });
 
@@ -109,11 +118,15 @@ proxySettingsRouter.put("/", async (c) => {
     if (isAutoWarmupSettingKey(key)) {
       warmupTouched = true;
     }
+    if (isCompressionSettingKey(key)) {
+      compressionTouched = true;
+    }
   }
 
   if (lbCacheTouched) pool.invalidateLoadBalancingCache();
   if (proxyPoolTouched) invalidateProxySettingsCache();
   if (warmupTouched) void autoWarmupScheduler.reload();
+  if (compressionTouched) invalidateCompressionCache();
 
   return c.json({ success: true, updated: Object.keys(body).length });
 });

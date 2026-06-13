@@ -115,23 +115,23 @@ function computeCredits(
   resultCredits?: number,
   resultCreditSource?: CreditSource
 ) {
+  // Always compute the estimated credit for quota management
+  const rate = providers[provider].getProviderCreditRate(model);
+  const estimatedCredits = totalTokens > 0 ? Math.max(0.01, totalTokens * rate) : 0;
+
+  // For display/logging, prefer upstream credit if available
   if (resultCredits !== undefined && resultCredits > 0) {
     return {
-      creditsUsed: Math.max(0.01, resultCredits),
+      creditsUsed: estimatedCredits || Math.max(0.01, resultCredits),
       creditSource: resultCreditSource || "upstream" as CreditSource,
-    };
-  }
-
-  if (totalTokens > 0) {
-    return {
-      creditsUsed: Math.max(0.01, totalTokens * providers[provider].getProviderCreditRate(model)),
-      creditSource: "estimated" as CreditSource,
+      upstreamCredits: resultCredits,
     };
   }
 
   return {
-    creditsUsed: 0,
+    creditsUsed: estimatedCredits,
     creditSource: resultCreditSource || "estimated" as CreditSource,
+    upstreamCredits: 0,
   };
 }
 
@@ -322,6 +322,7 @@ function wrapStreamWithUsageFinalizer(
     const finalPromptTokens = promptTokens || context.fallbackPromptTokens;
     const finalCompletionTokens = completionTokens || estimateTokensFromText(streamedContent) || context.fallbackCompletionTokens;
     const finalTotalTokens = totalTokens || finalPromptTokens + finalCompletionTokens || context.fallbackTotalTokens;
+
     const { creditsUsed, creditSource } = computeCredits(
       context.provider,
       context.model,

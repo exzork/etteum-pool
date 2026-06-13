@@ -105,8 +105,8 @@ app.use("/v1/*", async (c, next) => {
 
 // API Key authentication for management API
 app.use("/api/*", async (c, next) => {
-  // Allow health check, info, login, and key validation without auth
-  if (c.req.path === "/api/health" || c.req.path === "/api/info" || c.req.path === "/api/keys/test" || c.req.path === "/api/login") {
+  // Allow CORS preflight, health check, info, login, and key validation without auth
+  if (c.req.method === "OPTIONS" || c.req.path === "/api/health" || c.req.path === "/api/info" || c.req.path === "/api/keys/test" || c.req.path === "/api/login") {
     await next();
     return;
   }

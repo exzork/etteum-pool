@@ -359,10 +359,19 @@ function applyUpsert(table: SyncTable, row: Record<string, unknown>): boolean {
 
     case "request_logs": {
       const r = row as any;
-      // Request logs: insert only (no conflict update — each node's logs are unique)
+      // Request logs: upsert — initial insert has estimates, stream finalizer updates with final values
       client.exec(`
-        INSERT OR IGNORE INTO request_logs (id, account_id, provider, model, prompt_tokens, completion_tokens, total_tokens, credits_used, status, duration_ms, error_message, account_email, account_quota_before, account_quota_after, api_key_id, api_key_name, created_at)
+        INSERT INTO request_logs (id, account_id, provider, model, prompt_tokens, completion_tokens, total_tokens, credits_used, status, duration_ms, error_message, account_email, account_quota_before, account_quota_after, api_key_id, api_key_name, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (id) DO UPDATE SET
+          prompt_tokens = excluded.prompt_tokens,
+          completion_tokens = excluded.completion_tokens,
+          total_tokens = excluded.total_tokens,
+          credits_used = excluded.credits_used,
+          status = excluded.status,
+          duration_ms = excluded.duration_ms,
+          error_message = excluded.error_message,
+          account_quota_after = excluded.account_quota_after
       `, [
         r.id, r.accountId, r.provider, r.model,
         r.promptTokens, r.completionTokens, r.totalTokens, r.creditsUsed,

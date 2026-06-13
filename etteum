@@ -18,6 +18,22 @@ while [ -L "$SCRIPT_PATH" ]; do
 done
 PROJECT_DIR=$(cd -P "$(dirname "$SCRIPT_PATH")" >/dev/null 2>&1 && pwd)
 
+# --- Resolve `bun` even in non-interactive shells (cron, ssh -c, systemd) ---
+# Bun's installer adds ~/.bun/bin to PATH only via .bashrc/.zshrc, so a pristine
+# non-interactive PATH (e.g. `ssh host './etteum start'`) won't see it.
+if ! command -v bun >/dev/null 2>&1; then
+  for candidate in "$HOME/.bun/bin" "/root/.bun/bin" "/usr/local/bin"; do
+    if [ -x "$candidate/bun" ]; then
+      export PATH="$candidate:$PATH"
+      break
+    fi
+  done
+fi
+if ! command -v bun >/dev/null 2>&1; then
+  echo "❌ bun not found in PATH or ~/.bun/bin — install Bun first (https://bun.sh)" >&2
+  # Don't `exit 1` here: do_status / usage shouldn't blow up just because bun is missing.
+fi
+
 PID_FILE="$PROJECT_DIR/.etteum.pid"
 LOG_FILE="$PROJECT_DIR/.etteum.log"
 ENV_FILE="$PROJECT_DIR/.env"

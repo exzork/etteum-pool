@@ -50,7 +50,7 @@ const defaultModelUsage: ModelUsage[] = [];
 function getChartHours(period: string): number | null {
   if (period === "1d") return 48;
   if (period === "7d") return 24 * 8;
-  if (period === "30d") return 24 * 31;
+  if (period === "30d") return 24 * 32;
   return null; // "all"
 }
 
@@ -59,6 +59,12 @@ function modelKey(row: { provider?: string; model?: string }) {
 }
 
 // ─── Local-timezone bucket helpers ──────────────────────────────────────────
+
+/** Truncate a Date to the start of its 10-minute slot in the user's local timezone */
+function trunc10MinLocal(d: Date): number {
+  const m = Math.floor(d.getMinutes() / 10) * 10;
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), m).getTime();
+}
 
 /** Truncate a Date to the start of its hour in the user's local timezone */
 function truncHourLocal(d: Date): number {
@@ -81,8 +87,9 @@ function truncMonthLocal(d: Date): number {
  */
 function snapToLocalBucket(utcEpoch: number, period: string): number {
   const d = new Date(utcEpoch);
-  if (period === "1d") return truncHourLocal(d);
-  if (period === "7d" || period === "30d") return truncDayLocal(d);
+  if (period === "1d") return trunc10MinLocal(d);
+  if (period === "7d") return truncHourLocal(d);
+  if (period === "30d") return truncDayLocal(d);
   return truncMonthLocal(d);
 }
 
@@ -95,9 +102,12 @@ function parseBucketKey(isoKey: string): number {
 function formatLabel(epoch: number, period: string): string {
   const d = new Date(epoch);
   if (period === "1d") {
-    return `${String(d.getHours()).padStart(2, "0")}:00`;
+    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
   }
-  if (period === "7d" || period === "30d") {
+  if (period === "7d") {
+    return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:00`;
+  }
+  if (period === "30d") {
     return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   }
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
@@ -107,8 +117,8 @@ function formatLabel(epoch: number, period: string): string {
  * Generate ordered bucket epochs for the chart, all in the user's local
  * timezone so labels read naturally.
  *
- * - **1d** — 25 hourly buckets as a rolling 24h window (now-24h → now).
- * - **7d** — 7 daily buckets ending today.
+ * - **1d** — 144 ten-minute buckets as a rolling 24h window (now-24h → now).
+ * - **7d** — 168 hourly buckets (7 days × 24 hours).
  * - **30d** — 30 daily buckets ending today.
  * - **all** — last 12 monthly buckets.
  */
@@ -117,17 +127,25 @@ function generateBuckets(period: string): number[] {
   const buckets: number[] = [];
 
   if (period === "1d") {
-    // Rolling 24h window: (now - 24h) → now, hourly buckets
+    // Rolling 24h window: (now - 24h) → now, 10-minute buckets
+    const now10 = trunc10MinLocal(now);
+    for (let i = 143; i >= 0; i--) {
+      buckets.push(now10 - i * 600_000);
+    }
+    return buckets;
+  }
+
+  if (period === "7d") {
+    // Rolling 7d window: hourly buckets
     const nowHour = truncHourLocal(now);
-    for (let i = 24; i >= 0; i--) {
+    for (let i = 167; i >= 0; i--) {
       buckets.push(nowHour - i * 3600_000);
     }
     return buckets;
   }
 
-  if (period === "7d" || period === "30d") {
-    const days = period === "7d" ? 7 : 30;
-    for (let i = days - 1; i >= 0; i--) {
+  if (period === "30d") {
+    for (let i = 29; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
       buckets.push(d.getTime());
     }

@@ -58,6 +58,7 @@ export default function UsageChart({ data = defaultData, colorsByModel = {} }: U
             fontSize={11}
             tickLine={false}
             axisLine={false}
+            interval={data.length > 50 ? Math.floor(data.length / 12) : data.length > 24 ? Math.floor(data.length / 8) : "preserveStartEnd"}
           />
           <YAxis
             stroke="#6b7280"

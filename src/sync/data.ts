@@ -11,6 +11,32 @@ import { setSuppressEmit } from "./state";
 import { clearChangelog } from "../db/change-tracker";
 
 /**
+ * Convert a timestamp value to epoch seconds for SQLite storage.
+ * Handles: Date objects, ISO strings, epoch ms, epoch seconds, and raw numbers from change tracker.
+ * Drizzle mode:"timestamp" stores as seconds in SQLite.
+ */
+function toEpochSec(val: unknown): number | null {
+  if (val == null) return null;
+  if (typeof val === "number") {
+    // If > 10 billion, it's milliseconds — convert to seconds
+    if (val > 10_000_000_000) return Math.floor(val / 1000);
+    // Already seconds
+    return val;
+  }
+  if (typeof val === "string" || val instanceof Date) {
+    const ms = new Date(val as string).getTime();
+    if (isNaN(ms)) return null;
+    return Math.floor(ms / 1000);
+  }
+  return null;
+}
+
+/** Epoch seconds for "now" */
+function nowSec(): number {
+  return Math.floor(Date.now() / 1000);
+}
+
+/**
  * Extract full sync-able state from local DB.
  * Includes usage_summary for metrics sync.
  * Excludes request_logs (large transient data synced via deltas only).
@@ -69,13 +95,13 @@ export async function applyFullState(data: SyncFullData, remoteNodeId: string): 
         r.id, r.provider, r.email, r.password, r.status, r.enabled ? 1 : 0,
         typeof r.tokens === "string" ? r.tokens : JSON.stringify(r.tokens),
         r.quotaLimit, r.quotaRemaining,
-        r.quotaResetAt ? new Date(r.quotaResetAt).getTime() : null,
-        r.lastUsedAt ? new Date(r.lastUsedAt).getTime() : null,
-        r.lastLoginAt ? new Date(r.lastLoginAt).getTime() : null,
+        r.quotaResetAt ? toEpochSec(r.quotaResetAt) : null,
+        r.lastUsedAt ? toEpochSec(r.lastUsedAt) : null,
+        r.lastLoginAt ? toEpochSec(r.lastLoginAt) : null,
         r.errorMessage,
         typeof r.metadata === "string" ? r.metadata : JSON.stringify(r.metadata),
-        r.createdAt ? new Date(r.createdAt).getTime() : Date.now(),
-        r.updatedAt ? new Date(r.updatedAt).getTime() : Date.now(),
+        r.createdAt ? toEpochSec(r.createdAt) : nowSec(),
+        r.updatedAt ? toEpochSec(r.updatedAt) : nowSec(),
       ]);
       applied++;
     } catch (e) {
@@ -91,7 +117,7 @@ export async function applyFullState(data: SyncFullData, remoteNodeId: string): 
         INSERT INTO api_keys (id, name, key, created_at)
         VALUES (?, ?, ?, ?)
         ON CONFLICT (key) DO UPDATE SET name = excluded.name
-      `, [r.id, r.name, r.key, r.createdAt ? new Date(r.createdAt).getTime() : Date.now()]);
+      `, [r.id, r.name, r.key, r.createdAt ? toEpochSec(r.createdAt) : nowSec()]);
       applied++;
     } catch (e) {
       console.error(`[Sync] Failed to apply api_key:`, e);
@@ -110,7 +136,7 @@ export async function applyFullState(data: SyncFullData, remoteNodeId: string): 
         ON CONFLICT (key) DO UPDATE SET
           value = CASE WHEN excluded.updated_at > COALESCE(settings.updated_at, 0) THEN excluded.value ELSE settings.value END,
           updated_at = CASE WHEN excluded.updated_at > COALESCE(settings.updated_at, 0) THEN excluded.updated_at ELSE settings.updated_at END
-      `, [r.key, r.value, r.updatedAt ? new Date(r.updatedAt).getTime() : Date.now()]);
+      `, [r.key, r.value, r.updatedAt ? toEpochSec(r.updatedAt) : nowSec()]);
       applied++;
     } catch (e) {
       console.error(`[Sync] Failed to apply setting:`, e);
@@ -134,8 +160,8 @@ export async function applyFullState(data: SyncFullData, remoteNodeId: string): 
       `, [
         r.id, r.ruleId, r.pattern, r.replacement,
         r.isActive ? 1 : 0, r.isRegex ? 1 : 0, r.sortOrder,
-        r.createdAt ? new Date(r.createdAt).getTime() : Date.now(),
-        r.updatedAt ? new Date(r.updatedAt).getTime() : Date.now(),
+        r.createdAt ? toEpochSec(r.createdAt) : nowSec(),
+        r.updatedAt ? toEpochSec(r.updatedAt) : nowSec(),
       ]);
       applied++;
     } catch (e) {
@@ -153,8 +179,8 @@ export async function applyFullState(data: SyncFullData, remoteNodeId: string): 
       `, [
         r.id, r.sourcePattern, r.matchType, r.targetModel,
         r.enabled ? 1 : 0, r.priority, r.label,
-        r.createdAt ? new Date(r.createdAt).getTime() : Date.now(),
-        r.updatedAt ? new Date(r.updatedAt).getTime() : Date.now(),
+        r.createdAt ? toEpochSec(r.createdAt) : nowSec(),
+        r.updatedAt ? toEpochSec(r.updatedAt) : nowSec(),
       ]);
       applied++;
     } catch (e) {
@@ -172,11 +198,11 @@ export async function applyFullState(data: SyncFullData, remoteNodeId: string): 
         ON CONFLICT DO NOTHING
       `, [
         r.id, r.url, r.type, r.label, r.status,
-        r.lastUsedAt ? new Date(r.lastUsedAt).getTime() : null,
-        r.lastCheckedAt ? new Date(r.lastCheckedAt).getTime() : null,
+        r.lastUsedAt ? toEpochSec(r.lastUsedAt) : null,
+        r.lastCheckedAt ? toEpochSec(r.lastCheckedAt) : null,
         r.errorMessage, r.latencyMs, r.successCount, r.failCount,
-        r.createdAt ? new Date(r.createdAt).getTime() : Date.now(),
-        r.updatedAt ? new Date(r.updatedAt).getTime() : Date.now(),
+        r.createdAt ? toEpochSec(r.createdAt) : nowSec(),
+        r.updatedAt ? toEpochSec(r.updatedAt) : nowSec(),
       ]);
       applied++;
     } catch (e) {
@@ -297,13 +323,13 @@ function applyUpsert(table: SyncTable, row: Record<string, unknown>): boolean {
         r.id, r.provider, r.email, r.password, r.status, r.enabled ? 1 : 0,
         typeof r.tokens === "string" ? r.tokens : JSON.stringify(r.tokens),
         r.quotaLimit, r.quotaRemaining,
-        r.quotaResetAt ? new Date(r.quotaResetAt).getTime() : null,
-        r.lastUsedAt ? new Date(r.lastUsedAt).getTime() : null,
-        r.lastLoginAt ? new Date(r.lastLoginAt).getTime() : null,
+        r.quotaResetAt ? toEpochSec(r.quotaResetAt) : null,
+        r.lastUsedAt ? toEpochSec(r.lastUsedAt) : null,
+        r.lastLoginAt ? toEpochSec(r.lastLoginAt) : null,
         r.errorMessage,
         typeof r.metadata === "string" ? r.metadata : JSON.stringify(r.metadata),
-        r.createdAt ? new Date(r.createdAt).getTime() : Date.now(),
-        r.updatedAt ? new Date(r.updatedAt).getTime() : Date.now(),
+        r.createdAt ? toEpochSec(r.createdAt) : nowSec(),
+        r.updatedAt ? toEpochSec(r.updatedAt) : nowSec(),
       ]);
       return true;
     }
@@ -314,7 +340,7 @@ function applyUpsert(table: SyncTable, row: Record<string, unknown>): boolean {
         INSERT INTO api_keys (id, name, key, created_at)
         VALUES (?, ?, ?, ?)
         ON CONFLICT (key) DO UPDATE SET name = excluded.name
-      `, [r.id, r.name, r.key, r.createdAt ? new Date(r.createdAt).getTime() : Date.now()]);
+      `, [r.id, r.name, r.key, r.createdAt ? toEpochSec(r.createdAt) : nowSec()]);
       return true;
     }
 
@@ -327,7 +353,7 @@ function applyUpsert(table: SyncTable, row: Record<string, unknown>): boolean {
         ON CONFLICT (key) DO UPDATE SET
           value = CASE WHEN excluded.updated_at > COALESCE(settings.updated_at, 0) THEN excluded.value ELSE settings.value END,
           updated_at = CASE WHEN excluded.updated_at > COALESCE(settings.updated_at, 0) THEN excluded.updated_at ELSE settings.updated_at END
-      `, [r.key, r.value, r.updatedAt ? new Date(r.updatedAt).getTime() : Date.now()]);
+      `, [r.key, r.value, r.updatedAt ? toEpochSec(r.updatedAt) : nowSec()]);
       return true;
     }
 
@@ -342,7 +368,7 @@ function applyUpsert(table: SyncTable, row: Record<string, unknown>): boolean {
         r.promptTokens, r.completionTokens, r.totalTokens, r.creditsUsed,
         r.status, r.durationMs, r.errorMessage, r.accountEmail,
         r.accountQuotaBefore, r.accountQuotaAfter, r.apiKeyId, r.apiKeyName,
-        r.createdAt ? new Date(r.createdAt).getTime() : Date.now(),
+        r.createdAt ? toEpochSec(r.createdAt) : nowSec(),
       ]);
       return true;
     }
@@ -388,8 +414,8 @@ function applyUpsert(table: SyncTable, row: Record<string, unknown>): boolean {
       `, [
         r.id, r.ruleId, r.pattern, r.replacement,
         r.isActive ? 1 : 0, r.isRegex ? 1 : 0, r.sortOrder,
-        r.createdAt ? new Date(r.createdAt).getTime() : Date.now(),
-        r.updatedAt ? new Date(r.updatedAt).getTime() : Date.now(),
+        r.createdAt ? toEpochSec(r.createdAt) : nowSec(),
+        r.updatedAt ? toEpochSec(r.updatedAt) : nowSec(),
       ]);
       return true;
     }
@@ -402,8 +428,8 @@ function applyUpsert(table: SyncTable, row: Record<string, unknown>): boolean {
       `, [
         r.id, r.sourcePattern, r.matchType, r.targetModel,
         r.enabled ? 1 : 0, r.priority, r.label,
-        r.createdAt ? new Date(r.createdAt).getTime() : Date.now(),
-        r.updatedAt ? new Date(r.updatedAt).getTime() : Date.now(),
+        r.createdAt ? toEpochSec(r.createdAt) : nowSec(),
+        r.updatedAt ? toEpochSec(r.updatedAt) : nowSec(),
       ]);
       return true;
     }
@@ -415,11 +441,11 @@ function applyUpsert(table: SyncTable, row: Record<string, unknown>): boolean {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         r.id, r.url, r.type, r.label, r.status,
-        r.lastUsedAt ? new Date(r.lastUsedAt).getTime() : null,
-        r.lastCheckedAt ? new Date(r.lastCheckedAt).getTime() : null,
+        r.lastUsedAt ? toEpochSec(r.lastUsedAt) : null,
+        r.lastCheckedAt ? toEpochSec(r.lastCheckedAt) : null,
         r.errorMessage, r.latencyMs, r.successCount, r.failCount,
-        r.createdAt ? new Date(r.createdAt).getTime() : Date.now(),
-        r.updatedAt ? new Date(r.updatedAt).getTime() : Date.now(),
+        r.createdAt ? toEpochSec(r.createdAt) : nowSec(),
+        r.updatedAt ? toEpochSec(r.updatedAt) : nowSec(),
       ]);
       return true;
     }

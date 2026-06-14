@@ -639,17 +639,21 @@ export const upsertUsageSummary = spacetimedb.reducer(
     ])][0];
 
     if (existing) {
+      // The caller passes per-request deltas (e.g. totalRequests=1n for a single
+      // request). Accumulate them into the existing row instead of overwriting,
+      // otherwise every request in the same bucket clobbers the previous totals
+      // and the dashboard reports only the last request's stats.
       ctx.db.usageSummary.id.update({
         ...existing,
-        apiKeyName: args.apiKeyName,
-        totalRequests: args.totalRequests,
-        successRequests: args.successRequests,
-        errorRequests: args.errorRequests,
-        promptTokens: args.promptTokens,
-        completionTokens: args.completionTokens,
-        totalTokens: args.totalTokens,
-        creditsUsed: args.creditsUsed,
-        totalDurationMs: args.totalDurationMs,
+        apiKeyName: args.apiKeyName ?? existing.apiKeyName,
+        totalRequests: existing.totalRequests + args.totalRequests,
+        successRequests: existing.successRequests + args.successRequests,
+        errorRequests: existing.errorRequests + args.errorRequests,
+        promptTokens: existing.promptTokens + args.promptTokens,
+        completionTokens: existing.completionTokens + args.completionTokens,
+        totalTokens: existing.totalTokens + args.totalTokens,
+        creditsUsed: existing.creditsUsed + args.creditsUsed,
+        totalDurationMs: existing.totalDurationMs + args.totalDurationMs,
       });
     } else {
       ctx.db.usageSummary.insert({ id: 0n, ...args });

@@ -10,7 +10,11 @@ import { activateQoderPat } from "../proxy/providers/qoder";
 
 export const accountsRouter = new Hono();
 
-/** Helper: generate a new unique bigint ID based on timestamp + random */
+/** Helper: generate a new unique bigint ID based on timestamp + random.
+ *  NOTE: In the STDB world, accounts.id is autoInc — pass 0n to upsertAccount
+ *  to insert a new row and let STDB assign the id. This helper survives only
+ *  for places where we need a fresh ID for non-account tables. Do NOT use
+ *  it for new account inserts; use insertAccount() below instead. */
 function newId(): bigint {
   return BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
 }
@@ -28,6 +32,73 @@ function parseTokens(tokens: string | undefined): Record<string, unknown> | unde
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Insert a brand-new account row into STDB and return its auto-incremented id.
+ *
+ * Why this exists: STDB's upsertAccount reducer treats any non-zero id as an
+ * UPDATE and throws "Account not found" when the id doesn't exist. New rows
+ * MUST be inserted with id=0n so the auto-inc index assigns a real id. After
+ * the reducer applies, we look up the row by (provider, email) — that index
+ * is btree-only (not unique), so we tolerate the rare case where the lookup
+ * sees an older row by always preferring the row we just wrote (highest
+ * createdAt wins).
+ *
+ * The local STDB client cache is updated on the same WS frame that ack's the
+ * reducer, so a synchronous lookup after `await call.upsertAccount` normally
+ * finds the row. The retry loop guards against scheduler jitter.
+ */
+async function insertAccount(args: {
+  provider: string;
+  email: string;
+  password: string;
+  status: string;
+  enabled: boolean;
+  tokens: string | null;
+  quotaLimit: number;
+  quotaRemaining: number;
+  quotaResetAt?: bigint | null;
+  lastUsedAt?: bigint | null;
+  lastLoginAt?: bigint | null;
+  errorMessage?: string | null;
+  metadata?: string | null;
+}): Promise<bigint> {
+  await call.upsertAccount({
+    id: 0n,
+    provider: args.provider,
+    email: args.email,
+    password: args.password,
+    status: args.status,
+    enabled: args.enabled,
+    tokens: args.tokens,
+    quotaLimit: args.quotaLimit,
+    quotaRemaining: args.quotaRemaining,
+    quotaResetAt: args.quotaResetAt ?? null,
+    lastUsedAt: args.lastUsedAt ?? null,
+    lastLoginAt: args.lastLoginAt ?? null,
+    errorMessage: args.errorMessage ?? null,
+    metadata: args.metadata ?? null,
+  });
+
+  // Look up the just-inserted row. Same-tick lookup almost always succeeds
+  // because STDB applies the row update on the same WS frame as the reducer
+  // ack; the brief retry loop is just a safety net.
+  for (let attempt = 0; attempt < 10; attempt++) {
+    // findByProviderEmail uses btree index `by_provider_email` — may return
+    // any matching row if multiple exist. We pick the highest id (most recent
+    // insert under autoInc) to ensure we point at the row we just wrote.
+    const matches = db.accounts.getAll().filter(
+      (a) => a.provider === args.provider && a.email === args.email
+    );
+    if (matches.length > 0) {
+      let max = matches[0]!.id;
+      for (const m of matches) if (m.id > max) max = m.id;
+      return max;
+    }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error(`insertAccount: row not visible after upsert (provider=${args.provider}, email=${args.email})`);
 }
 
 /**
@@ -105,9 +176,7 @@ accountsRouter.post("/byok", async (c) => {
   };
 
   try {
-    const id = newId();
-    await call.upsertAccount({
-      id,
+    const id = await insertAccount({
       provider: "byok",
       email: body.label,
       password: encryptedKey,
@@ -116,11 +185,6 @@ accountsRouter.post("/byok", async (c) => {
       tokens: JSON.stringify(tokens),
       quotaLimit: -1,
       quotaRemaining: -1,
-      quotaResetAt: null,
-      lastUsedAt: null,
-      lastLoginAt: null,
-      errorMessage: null,
-      metadata: null,
     });
 
     pool.invalidate("byok" as ProviderName);
@@ -464,9 +528,7 @@ accountsRouter.post("/", async (c) => {
         return c.json({ id: existing.id, provider: "qoder", email, status: "active", updated: true }, 200);
       }
 
-      const id = newId();
-      await call.upsertAccount({
-        id,
+      const id = await insertAccount({
         provider: "qoder",
         email,
         password: encrypt("pat-login"),
@@ -475,11 +537,7 @@ accountsRouter.post("/", async (c) => {
         tokens: JSON.stringify(tokens),
         quotaLimit: 0,
         quotaRemaining: 0,
-        quotaResetAt: null,
-        lastUsedAt: null,
         lastLoginAt: dateToBigint(new Date()),
-        errorMessage: null,
-        metadata: null,
       });
       pool.invalidate("qoder");
       broadcast({ type: "account_created", data: { id, provider: "qoder", email } });
@@ -501,9 +559,7 @@ accountsRouter.post("/", async (c) => {
   const status = body.tokens ? "active" : (body.status || "pending");
 
   try {
-    const id = newId();
-    await call.upsertAccount({
-      id,
+    const id = await insertAccount({
       provider: body.provider,
       email: body.email,
       password: encryptedPassword,
@@ -512,11 +568,6 @@ accountsRouter.post("/", async (c) => {
       tokens: body.tokens ? JSON.stringify(body.tokens) : null,
       quotaLimit: 0,
       quotaRemaining: 0,
-      quotaResetAt: null,
-      lastUsedAt: null,
-      lastLoginAt: null,
-      errorMessage: null,
-      metadata: null,
     });
 
     pool.invalidate(body.provider as ProviderName);
@@ -633,9 +684,7 @@ accountsRouter.post("/instant-login", async (c) => {
           metadata: existing.metadata ?? null,
         });
       } else {
-        const id = newId();
-        await call.upsertAccount({
-          id,
+        await insertAccount({
           provider: "kiro-pro",
           email,
           password: encrypt("instant-login"),
@@ -644,11 +693,7 @@ accountsRouter.post("/instant-login", async (c) => {
           tokens: JSON.stringify(tokens),
           quotaLimit: 0,
           quotaRemaining: 0,
-          quotaResetAt: null,
-          lastUsedAt: null,
           lastLoginAt: dateToBigint(new Date()),
-          errorMessage: null,
-          metadata: null,
         });
       }
       success++;
@@ -686,9 +731,7 @@ accountsRouter.post("/bulk", async (c) => {
 
   for (const acc of body.accounts) {
     try {
-      const id = newId();
-      await call.upsertAccount({
-        id,
+      await insertAccount({
         provider: acc.provider,
         email: acc.email,
         password: encrypt(acc.password),
@@ -697,11 +740,6 @@ accountsRouter.post("/bulk", async (c) => {
         tokens: null,
         quotaLimit: 0,
         quotaRemaining: 0,
-        quotaResetAt: null,
-        lastUsedAt: null,
-        lastLoginAt: null,
-        errorMessage: null,
-        metadata: null,
       });
       results.push({ email: acc.email, success: true });
     } catch (error) {
@@ -939,9 +977,7 @@ async function upsertCodexAccount(email: string, tokens: Record<string, unknown>
     return existing.id;
   }
 
-  const id = newId();
-  await call.upsertAccount({
-    id,
+  const id = await insertAccount({
     provider: "codex",
     email,
     password: encrypt("instant-login"),
@@ -950,11 +986,7 @@ async function upsertCodexAccount(email: string, tokens: Record<string, unknown>
     tokens: JSON.stringify(tokens),
     quotaLimit: 0,
     quotaRemaining: 0,
-    quotaResetAt: null,
-    lastUsedAt: null,
     lastLoginAt: dateToBigint(new Date()),
-    errorMessage: null,
-    metadata: null,
   });
 
   return id;

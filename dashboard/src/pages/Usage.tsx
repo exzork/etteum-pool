@@ -1,13 +1,10 @@
 import TokenUsage from "@/components/dashboard/TokenUsage";
-import PerAccountAverage, {
-  type ProviderAccountInfo,
-} from "@/components/dashboard/PerAccountAverage";
+import PerAccountAverage from "@/components/dashboard/PerAccountAverage";
 import { useEffect, useState, useRef } from "react";
 import {
   fetchDashboardStats,
   fetchModelUsage,
   fetchAllApiKeys,
-  fetchProviders,
   type ApiKeyEntry,
 } from "@/lib/api";
 import { modelColor } from "@/lib/utils";
@@ -18,7 +15,6 @@ export default function Usage() {
   const [modelStats, setModelStats] = useState<any[]>([]);
   const [apiKeys, setApiKeys] = useState<ApiKeyEntry[]>([]);
   const [selectedKeyId, setSelectedKeyId] = useState<number>(0);
-  const [providerAccounts, setProviderAccounts] = useState<ProviderAccountInfo[]>([]);
   const reloadRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -30,9 +26,6 @@ export default function Usage() {
     await Promise.all([
       fetchDashboardStats(undefined, undefined, keyParam).then(setStats).catch(() => setStats(null)),
       fetchModelUsage(undefined, undefined, keyParam).then((res: { data: any[] }) => setModelStats(res.data || [])).catch(() => setModelStats([])),
-      fetchProviders()
-        .then((res: { data: ProviderAccountInfo[] }) => setProviderAccounts(res.data || []))
-        .catch(() => setProviderAccounts([])),
     ]);
   }
 
@@ -92,11 +85,7 @@ export default function Usage() {
 
       <TokenUsage stats={tokenStats} modelUsage={modelUsage} />
 
-      <PerAccountAverage
-        modelUsage={modelUsage}
-        providers={providerAccounts}
-        periodLabel="Lifetime totals"
-      />
+      <PerAccountAverage apiKeyId={selectedKeyId > 0 ? selectedKeyId : undefined} />
     </div>
   );
 }

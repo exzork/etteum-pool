@@ -1,26 +1,12 @@
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatNumber, modelColor } from "@/lib/utils";
-
-interface ModelUsage {
-  provider?: string;
-  model: string;
-  tokens: number;
-  requests?: number;
-}
-
-export interface ProviderAccountInfo {
-  provider: string;
-  totalAccounts: number;
-  activeAccounts: number;
-  exhaustedAccounts?: number;
-  errorAccounts?: number;
-}
+import { fetchPerAccountUsage, type PerAccountUsageRow } from "@/lib/api";
+import { useWsEvent } from "@/hooks/useWebSocket";
 
 interface Props {
-  modelUsage: ModelUsage[];
-  providers: ProviderAccountInfo[];
-  /** Human label for the active period — used in the subtitle */
-  periodLabel?: string;
+  /** API-key filter inherited from the page header */
+  apiKeyId?: number;
 }
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -31,7 +17,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   "gitlab-duo": "GitLab Duo",
 };
 
-function labelFor(provider: string): string {
+function labelForProvider(provider: string): string {
   if (PROVIDER_LABELS[provider]) return PROVIDER_LABELS[provider]!;
   return provider
     .split("-")
@@ -39,196 +25,284 @@ function labelFor(provider: string): string {
     .join(" ");
 }
 
-interface Row {
-  provider: string;
-  tokens: number;
-  requests: number;
-  totalAccounts: number;
-  activeAccounts: number;
-  perAccount: number;
-  perActiveAccount: number;
-  color: string;
+function statusColor(status: string | null, enabled: boolean | null): string {
+  if (enabled === false) return "text-[var(--muted-foreground)]";
+  switch (status) {
+    case "active": return "text-emerald-400";
+    case "exhausted": return "text-amber-400";
+    case "error": return "text-red-400";
+    case "pending": return "text-sky-400";
+    default: return "text-[var(--muted-foreground)]";
+  }
 }
 
-export default function PerAccountAverage({ modelUsage, providers, periodLabel }: Props) {
-  // Aggregate period-aware tokens per provider from modelUsage
-  const tokensByProvider = new Map<string, { tokens: number; requests: number }>();
-  for (const m of modelUsage) {
-    const provider = m.provider || "unknown";
-    const existing = tokensByProvider.get(provider) || { tokens: 0, requests: 0 };
-    existing.tokens += Number(m.tokens || 0);
-    existing.requests += Number(m.requests || 0);
-    tokensByProvider.set(provider, existing);
+function formatRelative(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 0) return "just now";
+  const sec = Math.round(ms / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  return `${Math.round(hr / 24)}d ago`;
+}
+
+function formatWindow(windowStartIso: string | null): string {
+  if (!windowStartIso) return "no requests yet";
+  const ms = Date.now() - new Date(windowStartIso).getTime();
+  const min = Math.max(1, Math.round(ms / 60000));
+  if (min < 60) return `last ~${min} min`;
+  const hr = Math.round(min / 60);
+  return `last ~${hr}h`;
+}
+
+export default function PerAccountAverage({ apiKeyId }: Props) {
+  const [rows, setRows] = useState<PerAccountUsageRow[]>([]);
+  const [meta, setMeta] = useState<{
+    totalLogs: number;
+    uniqueAccounts: number;
+    windowStartIso: string | null;
+  }>({ totalLogs: 0, uniqueAccounts: 0, windowStartIso: null });
+  const [loading, setLoading] = useState(true);
+  const [providerFilter, setProviderFilter] = useState<string>("");
+  const [showAll, setShowAll] = useState(false);
+  const reloadRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  async function load() {
+    setLoading(true);
+    try {
+      const res = await fetchPerAccountUsage(
+        apiKeyId,
+        providerFilter || undefined,
+      );
+      setRows(res.data || []);
+      setMeta({
+        totalLogs: res.meta?.totalLogs || 0,
+        uniqueAccounts: res.meta?.uniqueAccounts || 0,
+        windowStartIso: res.meta?.windowStartIso ?? null,
+      });
+    } catch {
+      setRows([]);
+      setMeta({ totalLogs: 0, uniqueAccounts: 0, windowStartIso: null });
+    } finally {
+      setLoading(false);
+    }
   }
 
-  // Build rows: include any provider with accounts OR usage so empty providers
-  // are still visible (gives a sense of capacity headroom).
-  const providerKeys = new Set<string>([
-    ...providers.map((p) => p.provider),
-    ...tokensByProvider.keys(),
-  ]);
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiKeyId, providerFilter]);
 
-  const rows: Row[] = Array.from(providerKeys).map((provider, idx) => {
-    const info = providers.find((p) => p.provider === provider);
-    const usage = tokensByProvider.get(provider) || { tokens: 0, requests: 0 };
-    const totalAccounts = info?.totalAccounts || 0;
-    const activeAccounts = info?.activeAccounts || 0;
-    return {
-      provider,
-      tokens: usage.tokens,
-      requests: usage.requests,
-      totalAccounts,
-      activeAccounts,
-      perAccount: totalAccounts > 0 ? usage.tokens / totalAccounts : 0,
-      perActiveAccount: activeAccounts > 0 ? usage.tokens / activeAccounts : 0,
-      color: modelColor(provider, idx),
-    };
+  // Refresh on every new request log so the panel stays live (debounced 750ms
+  // so a burst of WS events only triggers one fetch).
+  useWsEvent(["request_log", "request_error"], () => {
+    if (reloadRef.current) clearTimeout(reloadRef.current);
+    reloadRef.current = setTimeout(() => {
+      load();
+    }, 750);
   });
 
-  // Sort by per-account average desc — most-consumed-per-account at the top
-  rows.sort((a, b) => b.perAccount - a.perAccount);
+  useEffect(() => {
+    return () => {
+      if (reloadRef.current) clearTimeout(reloadRef.current);
+    };
+  }, []);
 
-  // Aggregate totals across providers
-  const totalTokens = rows.reduce((sum, r) => sum + r.tokens, 0);
-  const totalAccounts = rows.reduce((sum, r) => sum + r.totalAccounts, 0);
-  const totalActive = rows.reduce((sum, r) => sum + r.activeAccounts, 0);
-  const overallPerAccount = totalAccounts > 0 ? totalTokens / totalAccounts : 0;
-  const overallPerActive = totalActive > 0 ? totalTokens / totalActive : 0;
+  // Provider list for the filter dropdown — derived from rows so it only shows
+  // providers that actually have traffic in the window.
+  const providersInData = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of rows) set.add(r.provider);
+    return Array.from(set).sort();
+  }, [rows]);
 
-  const maxPerAccount = Math.max(1, ...rows.map((r) => r.perAccount));
+  // Aggregate totals across the visible rows
+  const totals = useMemo(() => {
+    let tokens = 0;
+    let requests = 0;
+    for (const r of rows) {
+      tokens += r.totalTokens;
+      requests += r.totalRequests;
+    }
+    const accounts = rows.filter((r) => r.accountId !== null).length;
+    return {
+      tokens,
+      requests,
+      accounts,
+      avgTokensPerAccount: accounts > 0 ? tokens / accounts : 0,
+      avgRequestsPerAccount: accounts > 0 ? requests / accounts : 0,
+    };
+  }, [rows]);
+
+  const maxTokens = useMemo(
+    () => Math.max(1, ...rows.map((r) => r.totalTokens)),
+    [rows],
+  );
+
+  const visibleRows = showAll ? rows : rows.slice(0, 10);
 
   return (
     <Card className="border-[var(--border)]">
       <CardHeader>
-        <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-          <CardTitle className="text-lg">Tokens per Account</CardTitle>
-          {periodLabel ? (
-            <span className="text-xs text-[var(--muted-foreground)]">{periodLabel}</span>
-          ) : null}
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <CardTitle className="text-lg">Tokens per Account</CardTitle>
+            <p className="text-sm text-[var(--muted-foreground)] mt-1">
+              Per-account consumption from request logs ·{" "}
+              <span className="text-[var(--foreground)]">
+                {formatWindow(meta.windowStartIso)}
+              </span>{" "}
+              · {meta.totalLogs} requests across {meta.uniqueAccounts} accounts
+            </p>
+          </div>
+          <select
+            value={providerFilter}
+            onChange={(e) => setProviderFilter(e.target.value)}
+            className="h-9 rounded-md border border-[var(--border)] bg-[var(--background)] px-3 text-sm text-[var(--foreground)]"
+          >
+            <option value="">All Providers</option>
+            {providersInData.map((p) => (
+              <option key={p} value={p}>{labelForProvider(p)}</option>
+            ))}
+          </select>
         </div>
-        <p className="text-sm text-[var(--muted-foreground)] mt-1">
-          Average tokens consumed per account, by provider — useful to see how heavily
-          the account pool is being drained.
-        </p>
       </CardHeader>
       <CardContent className="space-y-6">
-        {/* Top-line aggregate cards */}
+        {/* Aggregate cards */}
         <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
           <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] p-3">
-            <p className="text-xs text-[var(--muted-foreground)]">Total Tokens</p>
-            <p className="text-xl font-bold mt-1">{formatNumber(totalTokens)}</p>
+            <p className="text-xs text-[var(--muted-foreground)]">Tokens (window)</p>
+            <p className="text-xl font-bold mt-1">{formatNumber(totals.tokens)}</p>
           </div>
           <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] p-3">
-            <p className="text-xs text-[var(--muted-foreground)]">Accounts</p>
+            <p className="text-xs text-[var(--muted-foreground)]">Accounts Used</p>
+            <p className="text-xl font-bold mt-1">{formatNumber(totals.accounts)}</p>
+          </div>
+          <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] p-3">
+            <p className="text-xs text-[var(--muted-foreground)]">Avg Tokens / Account</p>
             <p className="text-xl font-bold mt-1">
-              {formatNumber(totalActive)}
-              <span className="text-sm font-normal text-[var(--muted-foreground)]">
-                {" "}
-                / {formatNumber(totalAccounts)}
-              </span>
+              {formatNumber(Math.round(totals.avgTokensPerAccount))}
             </p>
-            <p className="text-xs text-[var(--muted-foreground)] mt-0.5">active / total</p>
           </div>
           <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] p-3">
-            <p className="text-xs text-[var(--muted-foreground)]">Avg / Account</p>
-            <p className="text-xl font-bold mt-1">{formatNumber(Math.round(overallPerAccount))}</p>
-          </div>
-          <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] p-3">
-            <p className="text-xs text-[var(--muted-foreground)]">Avg / Active Account</p>
-            <p className="text-xl font-bold mt-1">{formatNumber(Math.round(overallPerActive))}</p>
+            <p className="text-xs text-[var(--muted-foreground)]">Avg Requests / Account</p>
+            <p className="text-xl font-bold mt-1">
+              {formatNumber(Math.round(totals.avgRequestsPerAccount))}
+            </p>
           </div>
         </div>
 
-        {/* Per-provider breakdown */}
+        {/* Table */}
         <div>
           <div className="hidden md:grid grid-cols-12 gap-3 text-xs uppercase tracking-wide text-[var(--muted-foreground)] mb-2 px-1">
-            <div className="col-span-3">Provider</div>
+            <div className="col-span-4">Account</div>
+            <div className="col-span-2">Provider</div>
+            <div className="col-span-2 text-right">Requests</div>
             <div className="col-span-2 text-right">Tokens</div>
-            <div className="col-span-2 text-right">Accounts (active/total)</div>
-            <div className="col-span-2 text-right">Avg / Account</div>
-            <div className="col-span-3 text-right">Avg / Active Account</div>
+            <div className="col-span-2 text-right">Last seen</div>
           </div>
 
-          <div className="space-y-3">
-            {rows.map((row) => (
-              <div
-                key={row.provider}
-                className="rounded-lg border border-[var(--border)] bg-[var(--secondary)]/50 p-3"
-              >
-                <div className="grid grid-cols-2 md:grid-cols-12 gap-3 items-center">
-                  <div className="md:col-span-3 flex items-center gap-2 min-w-0">
-                    <span
-                      className="h-2.5 w-2.5 rounded-full shrink-0"
-                      style={{ backgroundColor: row.color }}
-                    />
-                    <span className="truncate font-medium">{labelFor(row.provider)}</span>
-                  </div>
-
-                  <div className="md:col-span-2 md:text-right">
-                    <span className="md:hidden text-xs text-[var(--muted-foreground)] mr-2">
-                      Tokens
-                    </span>
-                    <span className="font-medium">{formatNumber(row.tokens)}</span>
-                    {row.requests > 0 ? (
-                      <span className="ml-2 text-xs text-[var(--muted-foreground)]">
-                        · {formatNumber(row.requests)} req
-                      </span>
-                    ) : null}
-                  </div>
-
-                  <div className="md:col-span-2 md:text-right">
-                    <span className="md:hidden text-xs text-[var(--muted-foreground)] mr-2">
-                      Accounts
-                    </span>
-                    <span className="font-medium">{row.activeAccounts}</span>
-                    <span className="text-[var(--muted-foreground)]">
-                      {" "}
-                      / {row.totalAccounts}
-                    </span>
-                  </div>
-
-                  <div className="md:col-span-2 md:text-right">
-                    <span className="md:hidden text-xs text-[var(--muted-foreground)] mr-2">
-                      Avg / Account
-                    </span>
-                    <span className="font-semibold">
-                      {row.totalAccounts > 0
-                        ? formatNumber(Math.round(row.perAccount))
-                        : "—"}
-                    </span>
-                  </div>
-
-                  <div className="md:col-span-3 md:text-right">
-                    <span className="md:hidden text-xs text-[var(--muted-foreground)] mr-2">
-                      Avg / Active Account
-                    </span>
-                    <span className="font-semibold">
-                      {row.activeAccounts > 0
-                        ? formatNumber(Math.round(row.perActiveAccount))
-                        : "—"}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Bar — relative to the heaviest-consumed provider on this page */}
-                <div className="mt-2 h-1.5 rounded-full bg-[var(--secondary)] overflow-hidden">
+          {loading && rows.length === 0 ? (
+            <p className="text-sm text-[var(--muted-foreground)]">Loading…</p>
+          ) : rows.length === 0 ? (
+            <p className="text-sm text-[var(--muted-foreground)]">
+              No request activity in the recent window.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {visibleRows.map((row, idx) => {
+                const color = modelColor(`${row.provider}/${row.accountEmail || row.accountId || "?"}`, idx);
+                const errorRate =
+                  row.totalRequests > 0
+                    ? (row.errorRequests / row.totalRequests) * 100
+                    : 0;
+                return (
                   <div
-                    className="h-full rounded-full transition-all"
-                    style={{
-                      width: `${Math.min(100, (row.perAccount / maxPerAccount) * 100)}%`,
-                      backgroundColor: row.color,
-                    }}
-                  />
-                </div>
-              </div>
-            ))}
+                    key={row.accountId ?? `noacc-${row.provider}`}
+                    className="rounded-lg border border-[var(--border)] bg-[var(--secondary)]/50 p-3"
+                  >
+                    <div className="grid grid-cols-2 md:grid-cols-12 gap-3 items-center">
+                      <div className="md:col-span-4 flex items-center gap-2 min-w-0">
+                        <span
+                          className="h-2.5 w-2.5 rounded-full shrink-0"
+                          style={{ backgroundColor: color }}
+                        />
+                        <div className="min-w-0">
+                          <div className="truncate font-medium">
+                            {row.accountEmail || (
+                              <span className="text-[var(--muted-foreground)] italic">
+                                {row.accountId === null
+                                  ? "(no account attribution)"
+                                  : `Account #${row.accountId} (deleted)`}
+                              </span>
+                            )}
+                          </div>
+                          {row.status ? (
+                            <div className={`text-xs ${statusColor(row.status, row.enabled)}`}>
+                              {row.enabled === false ? "disabled · " : ""}
+                              {row.status}
+                              {errorRate > 0 ? (
+                                <span className="text-[var(--muted-foreground)]">
+                                  {" "}· {errorRate.toFixed(0)}% errors
+                                </span>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
 
-            {rows.length === 0 && (
-              <p className="text-sm text-[var(--muted-foreground)]">
-                No provider data yet
-              </p>
-            )}
-          </div>
+                      <div className="md:col-span-2">
+                        <span className="md:hidden text-xs text-[var(--muted-foreground)] mr-2">
+                          Provider:
+                        </span>
+                        <span className="text-sm">{labelForProvider(row.provider)}</span>
+                      </div>
+
+                      <div className="md:col-span-2 md:text-right">
+                        <span className="md:hidden text-xs text-[var(--muted-foreground)] mr-2">
+                          Requests:
+                        </span>
+                        <span className="font-medium">{formatNumber(row.totalRequests)}</span>
+                      </div>
+
+                      <div className="md:col-span-2 md:text-right">
+                        <span className="md:hidden text-xs text-[var(--muted-foreground)] mr-2">
+                          Tokens:
+                        </span>
+                        <span className="font-semibold">{formatNumber(row.totalTokens)}</span>
+                      </div>
+
+                      <div className="md:col-span-2 md:text-right text-xs text-[var(--muted-foreground)]">
+                        {formatRelative(row.lastSeenAt)}
+                      </div>
+                    </div>
+
+                    {/* Bar — relative to the busiest account in the window */}
+                    <div className="mt-2 h-1.5 rounded-full bg-[var(--secondary)] overflow-hidden">
+                      <div
+                        className="h-full rounded-full transition-all"
+                        style={{
+                          width: `${Math.min(100, (row.totalTokens / maxTokens) * 100)}%`,
+                          backgroundColor: color,
+                        }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+
+              {rows.length > 10 && (
+                <button
+                  onClick={() => setShowAll((v) => !v)}
+                  className="text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] mt-2"
+                >
+                  {showAll ? `Show top 10 only` : `Show all ${rows.length} accounts`}
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </CardContent>
     </Card>

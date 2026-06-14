@@ -527,3 +527,133 @@ statsRouter.get("/models", async (c) => {
 
   return c.json({ data });
 });
+
+/**
+ * GET /api/stats/per-account - Per-account token consumption from request_logs.
+ *
+ * Why this exists: usage_summary aggregates by (bucket, provider, model, apiKey)
+ * but NOT by account, so it can't answer "which accounts are getting hammered".
+ * request_logs has accountId on every row; we group there. Caveat: request_logs
+ * is pruned to ~1h, so this is a recent-window view, not lifetime.
+ *
+ * Filters: ?provider=kiro to scope to one provider, ?apiKeyId=N to scope to a
+ * single key. Sorted by totalTokens desc.
+ */
+statsRouter.get("/per-account", async (c) => {
+  const provider = c.req.query("provider");
+  const apiKeyId = c.req.query("apiKeyId");
+
+  let logs: RequestLog[] = db.requestLogs.getAll();
+  if (provider) logs = logs.filter((l) => l.provider === provider);
+  if (apiKeyId) {
+    const keyId = BigInt(apiKeyId);
+    logs = logs.filter((l) => l.apiKeyId === keyId);
+  }
+
+  // Build account lookup once so we can join provider/email/status onto the
+  // aggregated rows. Fall back gracefully if the account has been deleted —
+  // we still want to show the orphan usage rather than silently dropping it.
+  const accountById = new Map<string, Account>();
+  for (const acc of db.accounts.getAll()) {
+    accountById.set(acc.id.toString(), acc);
+  }
+
+  type Bucket = {
+    accountId: string | null;
+    accountEmail: string | null;
+    provider: string;
+    status: string | null;
+    enabled: boolean | null;
+    totalRequests: number;
+    successRequests: number;
+    errorRequests: number;
+    totalTokens: number;
+    promptTokens: number;
+    completionTokens: number;
+    creditsUsed: number;
+    firstSeen: number;
+    lastSeen: number;
+  };
+
+  const grouped = new Map<string, Bucket>();
+  let totalLogs = 0;
+  let earliestLog = Number.POSITIVE_INFINITY;
+
+  for (const log of logs) {
+    totalLogs++;
+    const ts = Number(log.createdAt);
+    if (ts < earliestLog) earliestLog = ts;
+
+    // accountId can be null for orphan/system requests — bucket those together
+    // under a synthetic "no-account" key so they don't get silently dropped.
+    const aid = log.accountId === null || log.accountId === undefined
+      ? null
+      : log.accountId.toString();
+    const key = aid ?? `__noaccount__${log.provider}`;
+
+    const acc = aid ? accountById.get(aid) : undefined;
+    const existing = grouped.get(key);
+
+    if (existing) {
+      existing.totalRequests++;
+      if (log.status === "success") existing.successRequests++;
+      else existing.errorRequests++;
+      existing.totalTokens += Number(log.totalTokens || 0);
+      existing.promptTokens += Number(log.promptTokens || 0);
+      existing.completionTokens += Number(log.completionTokens || 0);
+      existing.creditsUsed += Number(log.creditsUsed || 0);
+      if (ts < existing.firstSeen) existing.firstSeen = ts;
+      if (ts > existing.lastSeen) existing.lastSeen = ts;
+    } else {
+      grouped.set(key, {
+        accountId: aid,
+        accountEmail: acc?.email ?? log.accountEmail ?? null,
+        provider: acc?.provider ?? log.provider,
+        status: acc?.status ?? null,
+        enabled: acc?.enabled ?? null,
+        totalRequests: 1,
+        successRequests: log.status === "success" ? 1 : 0,
+        errorRequests: log.status === "success" ? 0 : 1,
+        totalTokens: Number(log.totalTokens || 0),
+        promptTokens: Number(log.promptTokens || 0),
+        completionTokens: Number(log.completionTokens || 0),
+        creditsUsed: Number(log.creditsUsed || 0),
+        firstSeen: ts,
+        lastSeen: ts,
+      });
+    }
+  }
+
+  const data = [...grouped.values()]
+    .sort((a, b) => b.totalTokens - a.totalTokens)
+    .map((row) => ({
+      accountId: row.accountId,
+      accountEmail: row.accountEmail,
+      provider: row.provider,
+      status: row.status,
+      enabled: row.enabled,
+      totalRequests: row.totalRequests,
+      successRequests: row.successRequests,
+      errorRequests: row.errorRequests,
+      totalTokens: row.totalTokens,
+      promptTokens: row.promptTokens,
+      completionTokens: row.completionTokens,
+      creditsUsed: row.creditsUsed,
+      firstSeenAt: new Date(row.firstSeen).toISOString(),
+      lastSeenAt: new Date(row.lastSeen).toISOString(),
+    }));
+
+  // windowStartMs lets the dashboard label the period truthfully ("last ~50 min")
+  // instead of pretending it's lifetime data.
+  const windowStartMs = totalLogs > 0 ? earliestLog : null;
+
+  return c.json({
+    data,
+    meta: {
+      totalLogs,
+      uniqueAccounts: data.filter((r) => r.accountId !== null).length,
+      windowStartMs,
+      windowStartIso: windowStartMs ? new Date(windowStartMs).toISOString() : null,
+    },
+  });
+});

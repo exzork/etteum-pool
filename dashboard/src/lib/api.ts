@@ -144,6 +144,44 @@ export async function fetchAccounts() {
   return fetchApi("/api/accounts");
 }
 
+export interface PerAccountUsageRow {
+  accountId: string | null;
+  accountEmail: string | null;
+  provider: string;
+  status: string | null;
+  enabled: boolean | null;
+  totalRequests: number;
+  successRequests: number;
+  errorRequests: number;
+  totalTokens: number;
+  promptTokens: number;
+  completionTokens: number;
+  creditsUsed: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
+export interface PerAccountUsageResponse {
+  data: PerAccountUsageRow[];
+  meta: {
+    totalLogs: number;
+    uniqueAccounts: number;
+    windowStartMs: number | null;
+    windowStartIso: string | null;
+  };
+}
+
+export async function fetchPerAccountUsage(
+  apiKeyId?: number,
+  provider?: string,
+): Promise<PerAccountUsageResponse> {
+  const params = new URLSearchParams();
+  if (apiKeyId) params.set("apiKeyId", String(apiKeyId));
+  if (provider) params.set("provider", provider);
+  const qs = params.toString();
+  return fetchApi(`/api/stats/per-account${qs ? `?${qs}` : ""}`);
+}
+
 export async function fetchProviders() {
   return fetchApi("/api/stats/providers");
 }
